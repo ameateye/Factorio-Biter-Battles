@@ -445,6 +445,10 @@ function Public.tables()
     storage.biters_from_positive_threat = {}
 
     storage.gui_bb_pause_cooldown = 0
+
+    -- tt_mode: re-apply 80% lock, reset accumulators, etc. on soft-reset.
+    -- on_map_reset is a no-op if tt_mode is off, so this is safe vanilla-wise.
+    require('maps.biter_battles_v2.tt_mode').on_map_reset()
 end
 
 function Public.forces()

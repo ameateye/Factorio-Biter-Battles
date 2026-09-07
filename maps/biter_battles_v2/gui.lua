@@ -959,6 +959,11 @@ function Public.burners_balance(player)
     if player.force.name == 'spectator' then
         return
     end
+    if storage.tt_mode then
+        -- tt_mode owns the starting-kit handout entirely (plan §A — single source of truth).
+        require('maps.biter_battles_v2.tt_mode').give_starting_pack(player)
+        return
+    end
     if storage.got_burners[player.name] then
         return
     end
@@ -1558,7 +1563,11 @@ local function on_player_joined_game(event)
     if player.online_time == 0 then
         Init.set_default_settings(player)
         Functions.set_random_color(player)
-        Functions.show_intro(player)
+        -- tt_mode: skip the map-intro popup for newcomers (requested 2026-06-30).
+        -- The top-bar map_intro_button still lets them open it manually.
+        if not storage.tt_mode then
+            Functions.show_intro(player)
+        end
     end
 
     Public.create_main_gui(player)

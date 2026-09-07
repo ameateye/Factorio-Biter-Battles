@@ -35,6 +35,7 @@ require('maps.biter_battles_v2.sciencelogs_tab')
 require('maps.biter_battles_v2.feed_values_tab')
 require('maps.biter_battles_v2.changelog_tab')
 require('maps.biter_battles_v2.commands')
+require('maps.biter_battles_v2.tt_mode')
 require('modules.spawners_contain_biters')
 
 local function on_player_joined_game(event)
@@ -82,7 +83,7 @@ local function on_player_joined_game(event)
         ping_header.destroy()
     end
 
-    Gui.burners_balance(player)
+    Gui.burners_balance(player)  -- tt_mode handoff lives inside this fn (see gui.lua)
 end
 
 local function on_gui_click(event)
@@ -406,12 +407,18 @@ local function on_built_entity(event)
     Functions.no_turret_creep(event)
     Terrain.deny_enemy_side_ghosts(event)
     AiTargets.start_tracking(event.entity)
+    if storage.tt_mode then
+        require('maps.biter_battles_v2.tt_mode').on_laser_built(event.entity)
+    end
 end
 
 local function on_robot_built_entity(event)
     Functions.no_turret_creep(event)
     Terrain.deny_construction_bots(event)
     AiTargets.start_tracking(event.entity)
+    if storage.tt_mode then
+        require('maps.biter_battles_v2.tt_mode').on_laser_built(event.entity)
+    end
 end
 
 local function on_robot_built_tile(event)

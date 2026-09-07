@@ -223,11 +223,51 @@ function Public.add_feeding_stats(
     end
 end
 
-function Public.do_raw_feed(flask_amount, food, biter_force_name)
+-- Set the canonical evo-derived state for a biter force. Used by do_raw_feed
+-- (in-line, additive evo path) AND by tt_mode.tt_recompute_evo (which SETS
+-- the absolute target). NEVER touches storage.bb_threat (instantaneous threat
+-- pool); only bb_threat_income, the passive income derived from evo.
+local function apply_evo_state(biter_force_name, evo, biter_health_factor, passive_threat)
     local force_index = game.forces[biter_force_name].index
+    storage.biter_health_factor[force_index] = biter_health_factor
+    -- cojito_3v3_balance_testing (2026-09-04): passive threat income comes from
+    -- cumulative mutagen (calc_feed_effects.passive_threat), no longer evo*25.
+    storage.bb_threat_income[biter_force_name] = passive_threat
+    game.forces[biter_force_name].set_evolution_factor(math.min(evo, 1), storage.bb_surface_name)
+    storage.bb_evolution[biter_force_name] = evo
+    set_biter_endgame_modifiers(game.forces[biter_force_name])
+    if evo > 1 then
+        update_boss_modifiers(biter_force_name, 2, 1)
+    end
+    if evo > 3.3 then
+        storage.max_group_size[biter_force_name] = 50
+    elseif evo > 2.3 then
+        storage.max_group_size[biter_force_name] = 75
+    elseif evo > 1.3 then
+        storage.max_group_size[biter_force_name] = 100
+    elseif evo > 0.7 then
+        storage.max_group_size[biter_force_name] = 200
+    end
+end
+
+Public.apply_evo_state = apply_evo_state
+
+function Public.do_raw_feed(flask_amount, food, biter_force_name)
     local decimals = 9
 
-    local food_value = food_values[food].value * storage.difficulty_vote_value
+    -- tt_mode: bake rocket-x3 into the food value (plan §E, default interpretation)
+    -- AND accumulate RAW mutagen for the retroactive-send recompute (plan §D).
+    local raw_food_unit = food_values[food].value
+    if storage.tt_mode and food == 'space-science-pack' then
+        raw_food_unit = raw_food_unit * 3
+    end
+    if storage.tt_mode then
+        storage.tt_raw_mutagen = storage.tt_raw_mutagen or { north_biters = 0, south_biters = 0 }
+        storage.tt_raw_mutagen[biter_force_name] =
+            (storage.tt_raw_mutagen[biter_force_name] or 0) + raw_food_unit * flask_amount
+    end
+
+    local food_value = raw_food_unit * storage.difficulty_vote_value
 
     local evo = storage.bb_evolution[biter_force_name]
     local threat = 0.0
@@ -243,27 +283,8 @@ function Public.do_raw_feed(flask_amount, food, biter_force_name)
     evo = evo + effects.evo_increase
     threat = threat + effects.threat_increase * (storage.threat_multiplier or 1)
     evo = math_round(evo, decimals)
-    storage.biter_health_factor[force_index] = effects.biter_health_factor
 
-    --SET THREAT INCOME
-    storage.bb_threat_income[biter_force_name] = effects.passive_threat
-
-    game.forces[biter_force_name].set_evolution_factor(math.min(evo, 1), storage.bb_surface_name)
-    storage.bb_evolution[biter_force_name] = evo
-    set_biter_endgame_modifiers(game.forces[biter_force_name])
-
-    if evo > 1 then
-        update_boss_modifiers(biter_force_name, 2, 1)
-    end
-    if evo > 3.3 then -- 330% evo => 3.3
-        storage.max_group_size[biter_force_name] = 50
-    elseif evo > 2.3 then
-        storage.max_group_size[biter_force_name] = 75
-    elseif evo > 1.3 then
-        storage.max_group_size[biter_force_name] = 100
-    elseif evo > 0.7 then
-        storage.max_group_size[biter_force_name] = 200
-    end
+    apply_evo_state(biter_force_name, evo, effects.biter_health_factor, effects.passive_threat)
 
     storage.bb_threat[biter_force_name] = math_round(storage.bb_threat[biter_force_name] + threat, decimals)
 

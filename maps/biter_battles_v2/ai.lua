@@ -438,6 +438,12 @@ Public.raise_evo = function()
     if Functions.get_ticks_since_game_start() < 7200 then
         return
     end
+    -- tt_mode: update the 80%+ramp (plan §C). Replaces the index-based vanilla
+    -- ramp below (which doesn't apply because difficulty_vote_index = nil under tt_mode).
+    if storage.tt_mode then
+        local TtMode = require('maps.biter_battles_v2.tt_mode')
+        TtMode.update_ramp()
+    end
     if storage.difficulty_vote_index and 1 <= storage.difficulty_vote_index and 4 >= storage.difficulty_vote_index then
         local matchTimeInMinutes = Functions.get_ticks_since_game_start() / 3600
         storage.difficulty_vote_value = ((matchTimeInMinutes / 470) ^ 3.7)
@@ -463,6 +469,12 @@ Public.raise_evo = function()
         return
     end
     storage.evo_raise_counter = storage.evo_raise_counter + (1 * 0.50)
+
+    -- tt_mode: re-derive canonical evo from cumulative RAW mutagen at the new
+    -- difficulty (plan §D — retroactive send). Idempotent and pure.
+    if storage.tt_mode then
+        require('maps.biter_battles_v2.tt_mode').tt_recompute_all()
+    end
 end
 
 Public.reset_evo = function()

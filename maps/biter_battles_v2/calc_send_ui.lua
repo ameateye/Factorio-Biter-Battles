@@ -151,7 +151,13 @@ local function update_output_table(output_table, recv_force, foods)
 
     local total_food = 0
     for food, count in pairs(foods) do
-        total_food = total_food + count * BbTables.food_values[food].value
+        local unit = BbTables.food_values[food].value
+        -- mirror feeding.do_raw_feed: tournament mode feeds white at x3, the
+        -- calculator must predict what the send will actually do
+        if storage.tt_mode and food == 'space-science-pack' then
+            unit = unit * 3
+        end
+        total_food = total_food + count * unit
     end
 
     local feed_effects = total_food == 0 and { evo = 0, evo_increase = 0, threat = 0, threat_increase = 0 }

@@ -211,7 +211,12 @@ function Public.calc_send_command(
     local debug_command_str =
         string.format('evo=%.1f difficulty=%d players=%d', evo, math.floor(difficulty), player_count)
     for k, v in pairs(foods) do
-        total_food = total_food + v * Tables.food_values[k].value
+        local unit = Tables.food_values[k].value
+        -- mirror feeding.do_raw_feed: tournament mode feeds white at x3
+        if storage.tt_mode and k == 'space-science-pack' then
+            unit = unit * 3
+        end
+        total_food = total_food + v * unit
         debug_command_str = debug_command_str .. string.format(' color=%s count=%d', k, v)
     end
     if total_food == 0 then
