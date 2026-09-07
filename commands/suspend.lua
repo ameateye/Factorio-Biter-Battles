@@ -156,7 +156,7 @@ local suspend_token = Token.register(function()
                     .. ', vote started by '
                     .. suspend_info.suspender_player_name,
             }))
-            storage.suspended_players[suspend_info.suspendee_player_name] = game.ticks_played
+            storage.suspended_players[suspend_info.suspendee_player_name] = game.tick
             local playerSuspended = game.get_player(suspend_info.suspendee_player_name)
             if playerSuspended and playerSuspended.valid and playerSuspended.physical_surface.name ~= 'gulag' then
                 punish_player(playerSuspended)
@@ -249,7 +249,7 @@ local function suspend_player(cmd)
                     cancel_suspend_vote()
                 end
                 -- Instant suspend
-                storage.suspended_players[victim_name] = game.ticks_played
+                storage.suspended_players[victim_name] = game.tick
                 punish_player(victim)
                 game.print(killer_name .. ' (admin) has suspended ' .. victim_name, { color = Color.orange })
                 Server.to_banned_embed(victim_name .. ' was suspended by admin ' .. killer_name)
@@ -300,7 +300,7 @@ local function on_player_joined_game(event)
     local player = game.get_player(event.player_index)
     if
         storage.suspended_players[player.name]
-        and (game.ticks_played - storage.suspended_players[player.name]) < storage.suspended_time
+        and (game.tick - storage.suspended_players[player.name]) < storage.suspended_time
     then
         punish_player(player)
     end

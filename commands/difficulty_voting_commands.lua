@@ -14,7 +14,7 @@ local function revote()
         else
             local tick = Functions.get_ticks_since_game_start()
             if storage.active_special_games['captain_mode'] then
-                tick = game.ticks_played
+                tick = game.tick
             end
             storage.difficulty_votes_timeout = tick + 10800
             storage.difficulty_player_votes = {}
@@ -56,7 +56,7 @@ local function close_difficulty_votes(cmd)
     end
     local tick = Functions.get_ticks_since_game_start()
     if storage.active_special_games['captain_mode'] then
-        tick = game.ticks_played
+        tick = game.tick
     end
     storage.difficulty_votes_timeout = tick
     local msg = player.name .. ' closed difficulty voting'

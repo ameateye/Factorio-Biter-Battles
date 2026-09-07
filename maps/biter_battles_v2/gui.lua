@@ -1079,14 +1079,14 @@ function join_team(player, force_name, forced_join, auto_join)
             end
             if
                 storage.suspended_players[player.name]
-                and (game.ticks_played - storage.suspended_players[player.name]) < storage.suspended_time
+                and (game.tick - storage.suspended_players[player.name]) < storage.suspended_time
             then
                 player.print(
                     'Not ready to return to your team yet as you are still suspended. Please wait '
                         .. math_ceil(
                             (
                                 storage.suspended_time
-                                - (math_floor((game.ticks_played - storage.suspended_players[player.name])))
+                                - (math_floor((game.tick - storage.suspended_players[player.name])))
                             ) / 60
                         )
                         .. ' seconds.',

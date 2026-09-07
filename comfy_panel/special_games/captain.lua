@@ -327,7 +327,7 @@ local function force_end_captain_event(player)
             TeamManager.switch_force(pl.name, 'spectator')
         end
     end
-    storage.difficulty_votes_timeout = game.ticks_played + 36000
+    storage.difficulty_votes_timeout = game.tick + 36000
     clear_character_corpses()
 end
 
@@ -612,7 +612,7 @@ local function check_if_enough_playtime_to_play(player)
 end
 
 local function allow_vote()
-    local tick = game.ticks_played
+    local tick = game.tick
     storage.difficulty_votes_timeout = tick + 999999
     storage.difficulty_player_votes = {}
     game.print(
@@ -1056,7 +1056,7 @@ local function start_captain_event()
     end
     local special = storage.special_games_variables.captain_mode
     special.prepaPhase = false
-    special.stats.tickGameStarting = game.ticks_played
+    special.stats.tickGameStarting = game.tick
     special.stats.NorthInitialCaptain = special.captainList[1]
     special.stats.SouthInitialCaptain = special.captainList[2]
     special.stats.InitialReferee = special.refereeName
@@ -1140,7 +1140,7 @@ local function prepare_start_captain_event()
 end
 
 local function close_difficulty_vote()
-    storage.difficulty_votes_timeout = game.ticks_played
+    storage.difficulty_votes_timeout = game.tick
     game.print('[font=default-large-bold]Difficulty voting is now closed ![/font]', { color = Color.cyan })
 end
 

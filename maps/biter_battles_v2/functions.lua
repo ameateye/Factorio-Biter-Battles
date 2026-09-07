@@ -225,7 +225,7 @@ function Functions.set_game_start_tick()
     if storage.bb_game_start_tick then
         return
     end
-    storage.bb_game_start_tick = game.ticks_played
+    storage.bb_game_start_tick = game.tick
     local message = 'The match has started! '
     Server.to_discord_bold(table.concat({ '*** ', message, ' ***' }))
 end
@@ -443,7 +443,7 @@ function Functions.get_ticks_since_game_start()
     if not start_tick then
         return 0
     end
-    return game.ticks_played - start_tick
+    return game.tick - start_tick
 end
 
 function Functions.team_name(force_name)

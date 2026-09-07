@@ -130,7 +130,7 @@ local function poll_difficulty(player)
 
     local tick = Functions.get_ticks_since_game_start()
     if storage.active_special_games['captain_mode'] then
-        tick = game.ticks_played
+        tick = game.tick
     end
     if tick >= storage.difficulty_votes_timeout then
         if player.online_time ~= 0 then
@@ -203,7 +203,7 @@ end
 
 local function on_player_joined_game(event)
     local player = game.get_player(event.player_index)
-    if game.ticks_played < storage.difficulty_votes_timeout then
+    if game.tick < storage.difficulty_votes_timeout then
         if not storage.difficulty_player_votes[player.name] then
             if storage.bb_settings.only_admins_vote or storage.tournament_mode then
                 if storage.active_special_games['captain_mode'] then
@@ -233,7 +233,7 @@ local function on_player_joined_game(event)
 end
 
 function Public.remove_player_from_difficulty_vote(player)
-    if game.ticks_played > storage.difficulty_votes_timeout then
+    if game.tick > storage.difficulty_votes_timeout then
         return
     end
     if not storage.difficulty_player_votes[player.name] then
@@ -286,7 +286,7 @@ local function on_gui_click(event)
     end
     local tick = Functions.get_ticks_since_game_start()
     if storage.active_special_games['captain_mode'] then
-        tick = game.ticks_played
+        tick = game.tick
     end
     if tick >= storage.difficulty_votes_timeout then
         event.element.parent.destroy()
