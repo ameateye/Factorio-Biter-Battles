@@ -443,6 +443,8 @@ function Public.tables()
     -- Cleared when biter of this id dies.
     ---@type { [integer]: true }
     storage.biters_from_positive_threat = {}
+
+    storage.gui_bb_pause_cooldown = 0
 end
 
 function Public.forces()

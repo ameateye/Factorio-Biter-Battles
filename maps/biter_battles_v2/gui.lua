@@ -678,6 +678,36 @@ function Public.create_main_gui(player)
         gui_style(button, { padding = 2, maximal_width = 38, maximal_height = 28 })
     end
 
+    do -- Pause buttons
+        local pause_frame =
+            sp.add({ type = 'frame', name = 'pause_frame', style = 'bordered_frame', direction = 'vertical' })
+        gui_style(pause_frame, { vertical_align = 'center' })
+
+        local flow = pause_frame.add({ type = 'flow', name = 'pause_flow', direction = 'horizontal' })
+        gui_style(flow, { vertical_align = 'center', horizontal_spacing = 4 })
+
+        local label = flow.add({ type = 'label', caption = 'Pause', style = 'caption_label' })
+        Gui.add_pusher(flow)
+
+        local button = flow.add({
+            type = 'sprite-button',
+            name = 'bb_pause',
+            sprite = 'utility/pause',
+            tooltip = style.bold('Pause game'),
+            style = 'tool_button',
+        })
+        gui_style(button, { size = 28, padding = 1 })
+
+        local button = flow.add({
+            type = 'sprite-button',
+            name = 'bb_resume_game',
+            sprite = 'utility/play',
+            tooltip = style.bold('Resume game'),
+            style = 'tool_button',
+        })
+        gui_style(button, { size = 28, padding = 1 })
+    end
+
     -- == SUBFOOTER ===============================================================
     do
         local subfooter =
@@ -856,6 +886,15 @@ function Public.refresh_main_gui(player, data)
                 t.info.tooltip = { 'info.info_button_tooltip' }
             end
         end
+    end
+
+    do -- Pause buttons
+        local pause_frame = main.pause_frame
+        pause_frame.visible = _DEBUG or ((not is_spec or player.admin) and not storage.bb_game_won_by_team)
+
+        local flow = pause_frame.pause_flow
+        flow.bb_pause.visible = _DEBUG or (not game.tick_paused and not storage.bb_game_won_by_team)
+        flow.bb_resume_game.visible = _DEBUG or (game.tick_paused and not storage.bb_game_won_by_team)
     end
 
     do -- Join/Resume
@@ -1490,6 +1529,26 @@ local function on_gui_click(event)
                 player.name .. ' does not want to play a captain game',
                 { color = { r = 0.9, g = 0.1, b = 0.1 } }
             )
+        end
+    end
+
+    if name == 'bb_pause' then
+        if not storage.bb_game_won_by_team and (not storage.gui_bb_pause_cooldown or storage.gui_bb_pause_cooldown < game.ticks_played) then
+            game.print('Game paused by ' .. player.name, { color = { r = 0.98, g = 0.66, b = 0.22 }, skip = defines.print_skip.never })
+
+            game.tick_paused = true
+            storage.gui_bb_pause_cooldown = game.ticks_played + 60
+            Public.refresh()
+        end
+    end
+
+    if name == 'bb_resume_game' then
+        if not storage.bb_game_won_by_team and (not storage.gui_bb_pause_cooldown or storage.gui_bb_pause_cooldown < game.ticks_played) then
+            game.print('Game resumed by ' .. player.name, { color = { r = 0.98, g = 0.66, b = 0.22 }, skip = defines.print_skip.never })
+
+            game.tick_paused = false
+            storage.gui_bb_pause_cooldown = game.ticks_played + 60
+            Public.refresh()
         end
     end
 end
