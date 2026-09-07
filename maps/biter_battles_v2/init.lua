@@ -230,7 +230,7 @@ function Public.queue_reveal_map()
     -- important to flush the queue upon resetting a map or chunk requests from previous maps could overlap
     Queue.clear(chart_queue)
 
-    local width = 2000 -- for one side
+    local width = 750 -- for one side (Carl 06/09: was 2000; smaller download, lighter autosaves)
     local height = 500 -- for one side
 
     for x = 16, width, 32 do

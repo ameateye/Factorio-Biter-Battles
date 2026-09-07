@@ -601,7 +601,7 @@ local function on_tick()
     end
 
     --[[
-		Map width: 2000 tiles (~64 chunks) each direction
+		Map width: 750 tiles (~24 chunks) each direction (League: was 2000, Carl 06/09)
 		Map height: 500 tiles (~16 chunks) each direction
 		Estimated time for complete reveal: 90s (5400 ticks)
 
