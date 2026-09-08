@@ -1,29 +1,38 @@
+local FeedingParams = require('maps.biter_battles_v2.feeding_params')
 local Tables = require('maps.biter_battles_v2.tables')
-local bb_config = require('maps.biter_battles_v2.config')
 
 local math_floor = math.floor
 
 local Public = {}
 
+-- The three feeding curves. Every constant in them is a parameter now, held in
+-- feeding_params.lua and retunable in a running game with /feeding-params:
+--
+--   evolution   E = (M / S) ^ p, continuing along its own tangent past 100%
+--   passive     P = a·E^n + b·E   per second
+--   instant     T = c·M
+--
+-- Evolution is reconstructed from `initial_evo` on every feed, so it stays a
+-- pure function of the total mutagen ever fed: ten small sends and one big send
+-- land in exactly the same place, and instant threat is exactly linear in the
+-- send whatever order the flasks arrive in.
+
 ---@param initial_evo number
 ---@param food_value number
 ---@param num_flasks integer
----@param current_player_count integer
+---@param current_player_count integer Unused: instant threat is a flat c·M, with no crowd modifier.
 ---@param max_reanim_thresh number Long ago, we used reanim_chance rather than health_factor, and this is the evo value at which it would sortof be 100% reanim_chance
 ---@return { evo_increase: number, threat_increase: number, biter_health_factor: number, passive_threat: number }
 function Public.calc_feed_effects(initial_evo, food_value, num_flasks, current_player_count, max_reanim_thresh)
+    local params = FeedingParams.get()
     local food = food_value * num_flasks
 
-    local evo_scale = 276.66
-    local evo_power = 0.3
-    local initial_food = (initial_evo ^ (1.0 / evo_power)) * evo_scale
+    local initial_food = FeedingParams.mutagen_for_evo(initial_evo, params)
     local total_food = initial_food + food
 
-    local evo = (total_food / evo_scale) ^ evo_power
-
-    -- TODO normalize mutagen to small biters/min
-    local small_biters_per_food = 1.5
-    local passive_threat = total_food * small_biters_per_food
+    local evo = FeedingParams.evo_for_mutagen(total_food, params)
+    local passive_threat = FeedingParams.passive_threat(evo, params)
+    local threat_increase = params.instant_scale * food
 
     local biter_health = 1
     if evo < 3.3 then
@@ -53,7 +62,7 @@ function Public.calc_feed_effects(initial_evo, food_value, num_flasks, current_p
 
     return {
         evo_increase = evo - initial_evo,
-        threat_increase = 0,
+        threat_increase = threat_increase,
         passive_threat = passive_threat,
         biter_health_factor = biter_health,
     }

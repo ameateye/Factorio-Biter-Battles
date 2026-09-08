@@ -299,6 +299,14 @@ function Public.tt_recompute_evo(biter_force_name)
     if raw <= 0 then return end
     local weighted = raw * storage.difficulty_vote_value
     local players = #game.forces.north.connected_players + #game.forces.south.connected_players
+    -- `effects.threat_increase` is DELIBERATELY discarded, and must stay that
+    -- way. This replays the whole game as one send from evo 0, so with instant
+    -- threat parameterised (feeding_params.lua, c * M) that field is the instant
+    -- threat of every flask ever fed -- banking it here, once a minute, would
+    -- inflate bb_threat without bound. The send path already banked it: do_raw_feed
+    -- adds threat_increase to storage.bb_threat before calling apply_evo_state,
+    -- which by contract only ever writes bb_threat_income. Evolution is the only
+    -- thing this function is here to restate.
     local effects = FeedingCalculations.calc_feed_effects(
         0, weighted, 1, players, storage.max_reanim_thresh
     )
