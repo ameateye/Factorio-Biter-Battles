@@ -31,6 +31,10 @@ function Public.calc_feed_effects(initial_evo, food_value, num_flasks, current_p
     local total_food = initial_food + food
 
     local evo = FeedingParams.evo_for_mutagen(total_food, params)
+    -- `params` is the set for the match format in force, and passive_threat
+    -- already carries that format's income multiplier. Instant threat is
+    -- deliberately left unscaled, so a send is worth relatively more in the
+    -- formats that damp the income.
     local passive_threat = FeedingParams.passive_threat(evo, params)
     local threat_increase = params.instant_scale * food
 

@@ -9,6 +9,7 @@ local Functions = require('maps.biter_battles_v2.functions')
 local Game_over = require('maps.biter_battles_v2.game_over')
 local Gui = require('maps.biter_battles_v2.gui')
 local Init = require('maps.biter_battles_v2.init')
+local MatchFormat = require('maps.biter_battles_v2.match_format')
 local Mirror_terrain = require('maps.biter_battles_v2.mirror_terrain')
 local Muted = require('utils.muted')
 local Team_manager = require('maps.biter_battles_v2.team_manager')
@@ -33,6 +34,7 @@ local antiAfkTimeBeforeEnabled = 60 * 60 * 5 -- in tick : 5 minutes
 local antiAfkTimeBeforeWarning = 60 * 60 * 3 + 60 * 40 -- in tick : 3 minutes 40s
 require('maps.biter_battles_v2.sciencelogs_tab')
 require('maps.biter_battles_v2.feed_values_tab')
+require('maps.biter_battles_v2.feeding_params_tab')
 require('maps.biter_battles_v2.changelog_tab')
 require('maps.biter_battles_v2.commands')
 require('maps.biter_battles_v2.tt_mode')
@@ -543,6 +545,15 @@ local tick_minute_functions = {
     [300 * 4 + 30 * 1] = anti_afk_system,
 }
 
+-- The keys above that make up one main attack cycle: setup, the seven waves,
+-- teardown. MatchFormat can widen the interval between cycles past the vanilla
+-- minute; the rest of the table (evo raise, silo pokes, autotagging, afk sweep)
+-- keeps its own cadence.
+local attack_cycle_keys = {}
+for wave = 0, 8 do
+    attack_cycle_keys[300 * 3 + 30 * wave] = true
+end
+
 local on_tick_profilers = {}
 local function profile(profilers, key, fn)
     if not storage.event_profiler_enabled then
@@ -592,7 +603,8 @@ local function on_tick()
 
     if tick % 30 == 0 then
         local key = tick % 3600
-        if tick_minute_functions[key] then
+        local skip = attack_cycle_keys[key] and MatchFormat.skip_attack_cycle(tick)
+        if tick_minute_functions[key] and not skip then
             profile(on_tick_profilers, key, function()
                 tick_minute_functions[key]()
             end)

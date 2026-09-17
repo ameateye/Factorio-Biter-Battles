@@ -1,89 +1,65 @@
 -- /feeding-params — retune the feeding curves in a running game.
 --
--- Admin only, and deliberately without a GUI: this is a balance-testing knob,
--- not a game setting. Reading it is open to everyone, because once an admin has
--- moved anything this report is the only honest account of what a flask buys.
+-- The chat form of the Evo and threat setup tab, kept because a retune is
+-- usually a line typed between two sends and because a command can set several
+-- numbers in one go. Both go through the same report and the same announcement,
+-- so the two can never quote a flask at different values.
 --
---   /feeding-params                       show what is in force
---   /feeding-params c=48.7 n=2.5          set one or more, by symbol or name
+-- There is one set of numbers per match format, so every form takes an optional
+-- format in front of it. Without one it is the format being played -- which on
+-- a server with no league match is `default`.
+--
+--   /feeding-params                       show the set in force
+--   /feeding-params 1v1                   show 1v1's set, whatever is being played
+--   /feeding-params c=48.7 n=2.5          retune the set in force, by symbol or name
 --   /feeding-params instant_scale=50      the long names work too
---   /feeding-params reset                 back to the defaults
+--   /feeding-params 1v1 b=7.5             retune 1v1 specifically
+--   /feeding-params 1v1 k=0.5             k is the passive income multiplier
+--   /feeding-params 2v2 interval=7200     ticks between waves; 3600 is one a minute
+--   /feeding-params all b=12              the same change to every format
+--   /feeding-params reset                 the set in force, back to defaults
+--   /feeding-params 3v3 reset             one format, back to defaults
+--   /feeding-params all reset             every format
 --
--- Changes are announced to everyone rather than applied quietly: they move what
--- a send is worth for both teams at once, and a silent retune mid-game would
--- read to players as the scenario misbehaving.
+-- Reading is open to everyone, because once an admin has moved anything this
+-- report is the only honest account of what a flask buys. Writing is admin-only.
 
 local FeedingParams = require('maps.biter_battles_v2.feeding_params')
+local MatchFormat = require('maps.biter_battles_v2.match_format')
 local Utils = require('utils.utils')
 
 local Public = {}
 
--- Evolutions the summary quotes at — the span the balance is argued over.
-local QUOTE_AT = { 0.5, 1.0, 1.5, 2.5 }
+local ALL = 'all'
 
----Human-readable value, without Lua's trailing ".0" on whole numbers.
----@param value number|boolean
----@return string
-local function show(value)
-    if type(value) == 'boolean' then
-        return value and 'true' or 'false'
+---Split off a leading format target, if there is one.
+---
+---`all` and the format keys are the only words that can appear where a target
+---goes, and none of them can be confused with a `key=value`, so a bare word is
+---unambiguous: either it names a set or it is a mistake worth reporting.
+---@param text string
+---@return string|nil target nil for "the format in force"
+---@return string rest
+local function split_target(text)
+    local head, rest = string.match(text, '^([%w_]+)%s*(.*)$')
+    if not head then
+        return nil, text
     end
-    if value == math.floor(value) and math.abs(value) < 1e15 then
-        return string.format('%d', value)
+    local lowered = string.lower(head)
+    if lowered == ALL or FeedingParams.is_format_key(lowered) then
+        return lowered, rest
     end
-    return (string.format('%.4f', value):gsub('0+$', ''):gsub('%.$', ''))
+    return nil, text
 end
 
----The three formulas, with the numbers in force substituted in.
----@param params FeedingParams
----@return string
-local function formulas(params)
-    return string.format(
-        'E = (M / %s) ^ %s%s   |   P = %s·E^%s + %s·E per sec   |   T = %s·M',
-        show(params.evo_mutagen_at_100),
-        show(params.evo_power),
-        params.evo_stop_scaling_at_100 and ', tangent past 100%' or ', power law throughout',
-        show(params.passive_scale),
-        show(FeedingParams.effective_passive_power(params)),
-        show(params.passive_linear),
-        show(params.instant_scale)
-    )
-end
-
----Every parameter, one per line, marked where it has been moved.
----@param params FeedingParams
----@return string
-local function report(params)
-    local lines = { '[feeding-params] ' .. formulas(params) }
-    for _, field in ipairs(FeedingParams.order) do
-        local symbol = ''
-        for alias, target in pairs(FeedingParams.aliases) do
-            if target == field and #alias <= 2 then
-                symbol = ' (' .. alias .. ')'
-            end
-        end
-        lines[#lines + 1] = string.format(
-            '  %s%s = %s%s',
-            field,
-            symbol,
-            show(params[field]),
-            FeedingParams.is_overridden(field) and string.format('   [default %s]', show(FeedingParams.defaults[field]))
-                or ''
-        )
+---Every set the command should write to for a given target.
+---@param target string|nil
+---@return string[]
+local function keys_for(target)
+    if target == ALL then
+        return FeedingParams.format_keys
     end
-
-    local row = {}
-    for _, evo in ipairs(QUOTE_AT) do
-        row[#row + 1] = string.format(
-            '%d%%: %.0f mutagen, %.0f threat/min, ratio %.1f min',
-            evo * 100,
-            FeedingParams.mutagen_for_evo(evo, params),
-            FeedingParams.passive_threat(evo, params) * 60,
-            FeedingParams.instant_over_passive(evo, params)
-        )
-    end
-    lines[#lines + 1] = '  ' .. table.concat(row, ' | ')
-    return table.concat(lines, '\n')
+    return { target or MatchFormat.format_key() }
 end
 
 ---@param cmd table
@@ -92,67 +68,64 @@ local function feeding_params(cmd)
     local print_to = player and function(msg)
         player.print(msg)
     end or log
+    local actor = player and player.name or 'server'
 
     local params = cmd.parameter and string.match(cmd.parameter, '^%s*(.-)%s*$') or ''
-    if params == '' then
-        print_to(report(FeedingParams.get()))
+    local target, rest = split_target(params)
+    rest = string.match(rest, '^%s*(.-)%s*$')
+
+    -- Reading `all` has no single set to print, so it shows the one in force
+    -- and leaves the rest to be asked for by name.
+    if rest == '' then
+        local key = (target and target ~= ALL) and target or MatchFormat.format_key()
+        print_to(FeedingParams.report(FeedingParams.get(key), key, MatchFormat.describe()))
         return
     end
 
-    -- Anything that writes needs admin. Reading does not: players are entitled
-    -- to know what a flask is worth, and the report is the only honest source
-    -- once an admin has moved anything.
     if player and not is_admin(player) then
         player.print('[feeding-params] Admin only. Run it with no arguments to see the current values.')
         return
     end
 
-    if string.lower(params) == 'reset' then
-        FeedingParams.reset()
-        game.print('>> [feeding-params] reset to defaults.\n' .. report(FeedingParams.get()))
+    local keys = keys_for(target)
+
+    if string.lower(rest) == 'reset' then
+        for _, key in ipairs(keys) do
+            FeedingParams.reset(key)
+        end
+        FeedingParams.announce_reset(actor, target or keys[1])
         return
     end
 
+    -- Parsed and applied per set, so `all` is the same change made nine times
+    -- rather than a second code path. A set that refuses a value stops the
+    -- whole command: half-applied is worse than not applied.
     local applied = {}
-    for pair in string.gmatch(params, '([^%s]+)') do
+    for pair in string.gmatch(rest, '([^%s]+)') do
         local key, value = string.match(pair, '^([%w_]+)=([%w%p]+)$')
         if not key then
             print_to(string.format('[feeding-params] cannot read %q — expected key=value', pair))
             return
         end
-        local stored, err = FeedingParams.set(key, value)
-        if err then
-            print_to('[feeding-params] ' .. err)
-            return
+
+        local stored
+        for _, format_key in ipairs(keys) do
+            local result, err = FeedingParams.set(key, value, format_key)
+            if err then
+                print_to(string.format('[feeding-params] %s (%s)', err, format_key))
+                return
+            end
+            stored = result
         end
-        applied[#applied + 1] = string.format('%s = %s', FeedingParams.resolve_key(key), show(stored))
+        applied[#applied + 1] = string.format('%s = %s', FeedingParams.resolve_key(key), FeedingParams.show(stored))
     end
 
-    local updated = FeedingParams.get()
-    game.print(
-        string.format(
-            '>> [feeding-params] %s changed %s\n%s',
-            player and player.name or 'server',
-            table.concat(applied, ', '),
-            report(updated)
-        ),
-        { r = 1, g = 0.85, b = 0.2 }
-    )
-
-    -- Evolution is reconstructed from each team's *current* evolution on every
-    -- feed, so moving S or p re-prices future sends without moving anyone's
-    -- evolution now. Triple Threat keeps the raw mutagen instead and derives
-    -- evolution from it, so there the change is retroactive and the canonical
-    -- value has to be recomputed or the two would disagree until the next send.
-    if storage.tt_mode then
-        require('maps.biter_battles_v2.tt_mode').tt_recompute_all()
-        game.print('>> [feeding-params] Triple Threat is on — evolution recomputed from raw mutagen fed.')
-    end
+    FeedingParams.announce_changed(actor, applied, target or keys[1])
 end
 
 commands.add_command(
     'feeding-params',
-    'Show the feeding curve constants; admins can retune them. Usage: /feeding-params [reset | key=value ...]',
+    'Show the feeding curve constants for a match format; admins can retune them. Usage: /feeding-params [1v1|all] [reset | key=value ...]',
     function(cmd)
         Utils.safe_wrap_cmd(cmd, feeding_params, cmd)
     end

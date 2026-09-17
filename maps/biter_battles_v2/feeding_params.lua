@@ -1,23 +1,61 @@
--- The constants of the feeding curves, as data rather than as literals.
+-- The constants of the feeding curves, as data rather than as literals, and one
+-- set of them per match format.
 --
 -- Three equations, seven numbers:
 --
 --   evolution   E = (M / S) ^ p                 S = evo_mutagen_at_100, p = evo_power
---   passive     P = a·E^n + b·E   per second    a, n, b
+--   passive     P = (a·E^n + b·E) · k  per sec  a, n, b, k = passive_income_scale
 --   instant     T = c·M                         c = instant_scale
 --
--- Defaults live in `defaults` below and are the only block worth editing by
--- hand. Admins retune a running game with /feeding-params, which writes into
--- storage.feeding_params; anything absent there falls back to the default, so a
--- save made before a field existed still loads and a partial override is a
--- legitimate state rather than a half-built table.
+-- Plus two rules a format imposes on top of them: `passive_income_scale`, which
+-- is how 1v1 gets half the income off the same curve, and `attack_interval`,
+-- the ticks between global attack waves.
 --
--- What the set is tuned against is the *marginal* ratio of the last two curves:
--- instant threat per unit of mutagen over the passive income per minute the same
--- mutagen buys. `instant_over_passive` computes it and /feeding-params prints it
--- at four evolutions, so a candidate can be judged without leaving the game.
+-- Every number is per format. `storage.feeding_params` is keyed by format --
+--
+--   storage.feeding_params = {
+--     ['1v1'] = { passive_linear = 12 },
+--     ['3v3'] = { instant_scale = 250 },
+--   }
+--
+-- -- so a retune of 1v1 leaves 3v3 exactly where it was. Three layers resolve a
+-- field, most specific first: the admin's override for that format, whatever
+-- the scenario ships differently for it (`format_defaults`), then the base
+-- `defaults`. A partial override is a legitimate state rather than a half-built
+-- table, so a save made before a field existed still loads.
 
 local Public = {}
+
+-- The global attack wave is dispatched once a minute, alternating sides, so a
+-- minute is the granularity any wave interval can land on. Intervals are stored
+-- in ticks because that is the unit the dispatcher counts in, and constrained to
+-- multiples of this because nothing finer is reachable.
+local TICKS_PER_MINUTE = 3600
+
+-- The format a game with nothing reported plays under. A real key rather than a
+-- nil case, so sandbox games are tunable like any other format.
+local BASE_KEY = 'default'
+
+Public.BASE_KEY = BASE_KEY
+
+-- Every set an admin can reach. Bounded by the team sizes match_format accepts.
+local format_keys = { BASE_KEY }
+for size = 1, 8 do
+    format_keys[#format_keys + 1] = string.format('%dv%d', size, size)
+end
+
+Public.format_keys = format_keys
+
+local is_format_key = {}
+for _, key in ipairs(format_keys) do
+    is_format_key[key] = true
+end
+
+---@param key string
+---@return boolean
+function Public.is_format_key(key)
+    return is_format_key[string.lower(key)] == true
+end
 
 ---@class FeedingParams
 ---@field evo_mutagen_at_100 number Mutagen that buys exactly 100% evolution.
@@ -27,7 +65,10 @@ local Public = {}
 ---@field passive_power number `n`, its exponent, before the past-100% correction.
 ---@field passive_linear number `b`, the linear term — the floor at low evolution.
 ---@field instant_scale number `c`, instant threat per unit of mutagen sent.
+---@field passive_income_scale number `k`, a multiplier on the whole passive curve.
+---@field attack_interval integer Ticks between global attack waves.
 
+---The same numbers in every format unless `format_defaults` says otherwise.
 ---@type FeedingParams
 local defaults = {
     evo_mutagen_at_100 = 277,
@@ -35,11 +76,43 @@ local defaults = {
     evo_stop_scaling_at_100 = true,
     passive_scale = 100,
     passive_power = 2.5,
-    passive_linear = 25,
+    -- Lowered from 25 (2026-09-17). Permanent and format-independent: the floor
+    -- was carrying too much of the early game at every team size.
+    passive_linear = 15,
     instant_scale = 200,
+    passive_income_scale = 1,
+    attack_interval = TICKS_PER_MINUTE,
 }
 
 Public.defaults = defaults
+
+---What the scenario ships differently for one format. Anything not named here
+---is the same number everywhere, so this stays a list of deliberate deviations
+---rather than a second copy of the defaults per format.
+local format_defaults = {
+    ['1v1'] = {
+        -- Two players hold the frontage a whole team otherwise holds, so the
+        -- vanilla income lands much harder on them. Expressed as a multiplier
+        -- rather than as halved a and b so that it survives a retune of the
+        -- curve underneath it.
+        passive_income_scale = 0.5,
+    },
+}
+
+Public.format_defaults = format_defaults
+
+---The shipped value of a field for a format: its deviation if it has one, the
+---base default otherwise.
+---@param field string
+---@param format_key string
+---@return number|boolean
+function Public.default_for(field, format_key)
+    local per_format = format_defaults[format_key]
+    if per_format and per_format[field] ~= nil then
+        return per_format[field]
+    end
+    return defaults[field]
+end
 
 -- Field name -> the symbol it is called by in the formulas and in the lab, so
 -- an admin can type either. `stop` is the odd one out because the boolean has
@@ -53,25 +126,55 @@ local aliases = {
     n = 'passive_power',
     b = 'passive_linear',
     c = 'instant_scale',
+    k = 'passive_income_scale',
+    income_scale = 'passive_income_scale',
+    interval = 'attack_interval',
 }
 
 Public.aliases = aliases
 
--- Print order. Grouped by equation rather than alphabetically: the numbers are
--- read as three formulas, not as seven unrelated settings.
-local order = {
-    'evo_mutagen_at_100',
-    'evo_power',
-    'evo_stop_scaling_at_100',
-    'passive_scale',
-    'passive_power',
-    'passive_linear',
-    'instant_scale',
+-- Print order. Grouped by what the numbers mean together rather than
+-- alphabetically: the first group is read as three formulas, the second as
+-- what a format does on top of them.
+local groups = {
+    {
+        title = 'Curve constants',
+        fields = {
+            'evo_mutagen_at_100',
+            'evo_power',
+            'evo_stop_scaling_at_100',
+            'passive_scale',
+            'passive_power',
+            'passive_linear',
+            'instant_scale',
+        },
+    },
+    {
+        title = 'Format rules',
+        note = 'What this format does on top of the curves above.',
+        fields = {
+            'passive_income_scale',
+            'attack_interval',
+        },
+    },
 }
+
+Public.groups = groups
+
+-- The groups flattened. Every loop that applies or reports a whole set walks
+-- this, and the order matters in one place: p has to come before n, because n's
+-- window depends on p and a change to both at once must store the new p first
+-- or the new n is judged against the window the old one opened.
+local order = {}
+for _, group in ipairs(groups) do
+    for _, field in ipairs(group.fields) do
+        order[#order + 1] = field
+    end
+end
 
 Public.order = order
 
--- Bounds. Two of the seven are not free parameters but intervals.
+-- Bounds. Two of the nine are not free parameters but intervals.
 --
 -- `p` is the diminishing return itself, so the family only means anything
 -- strictly inside (0, 1): at 1 evolution is linear in mutagen and the price of a
@@ -87,9 +190,26 @@ local limits = {
     passive_scale = { min = 0, max = 1e9 },
     passive_linear = { min = 0, max = 1e9 },
     instant_scale = { min = 0, max = 1e9 },
+    -- A multiplier, so 1 is "nothing different from the base curve" and the
+    -- useful range sits below it. The ceiling is well clear of 1 rather than at
+    -- it, so a format that wants *more* income than the curve is expressible.
+    passive_income_scale = { min = 0, max = 10 },
+    -- One minute is the vanilla cadence and the floor; an hour is the ceiling,
+    -- past which a match would end before the second wave landed.
+    attack_interval = { min = TICKS_PER_MINUTE, max = 60 * TICKS_PER_MINUTE },
     -- passive_power is deliberately absent: its window depends on evo_power and
     -- is computed by passive_power_bounds below.
 }
+
+-- Fields that only mean anything on a multiple of something. The wave interval
+-- is the one: the dispatcher offers a wave once a minute, so an interval of
+-- 5400 ticks cannot be honoured and would quietly behave as 3600. Refused on
+-- the way in rather than rounded, for the same reason an out-of-range number is.
+local steps = {
+    attack_interval = TICKS_PER_MINUTE,
+}
+
+Public.steps = steps
 
 local function clamp(value, low, high)
     return math.min(math.max(value, low), high)
@@ -114,6 +234,26 @@ function Public.passive_power_bounds(evo_power)
     return 1 + margin, ceiling - margin
 end
 
+---The interval a field is accepted in, or nil for the one that is a switch.
+---
+---`passive_power`'s window moves with `evo_power`, so the set in force has to be
+---passed in rather than read here: a caller applying several fields at once is
+---mid-change, and the window that matters is the one the *new* `p` opens.
+---@param field string
+---@param params FeedingParams
+---@return number|nil min
+---@return number|nil max
+function Public.bounds(field, params)
+    if field == 'passive_power' then
+        return Public.passive_power_bounds(params.evo_power)
+    end
+    local limit = limits[field]
+    if not limit then
+        return nil, nil
+    end
+    return limit.min, limit.max
+end
+
 ---Put a parameter set inside those bounds.
 ---
 ---Every field goes through here rather than only the ones that look risky: `n`'s
@@ -126,6 +266,9 @@ end
 function Public.clamp(params)
     for field, limit in pairs(limits) do
         params[field] = clamp(params[field], limit.min, limit.max)
+    end
+    for field, step in pairs(steps) do
+        params[field] = math.floor(params[field] / step) * step
     end
     local n_min, n_max = Public.passive_power_bounds(params.evo_power)
     params.passive_power = clamp(params.passive_power, n_min, n_max)
@@ -143,58 +286,84 @@ function Public.resolve_key(key)
     return aliases[key]
 end
 
----The overrides table, or nil when there is none. Tolerates `storage` being
----absent so the pure-Lua tests can require this module outside Factorio.
+---The format whose set is in force.
+---
+---match_format requires this module at load, so the dependency can only run
+---this direction at runtime -- hence the local require. `require` on a module
+---already in package.loaded is a table lookup, and this is reached a few times
+---a minute, not per tick.
+---@return string
+function Public.current_key()
+    if type(storage) ~= 'table' then
+        return BASE_KEY
+    end
+    return require('maps.biter_battles_v2.match_format').format_key()
+end
+
+---The override table for one format, or nil when there is none. Tolerates
+---`storage` being absent so the pure-Lua tests can require this outside Factorio.
+---@param format_key string
 ---@return table|nil
-local function overrides()
+local function overrides(format_key)
     local store = storage
     if type(store) ~= 'table' then
         return nil
     end
-    local set = store.feeding_params
+    local all = store.feeding_params
+    if type(all) ~= 'table' then
+        return nil
+    end
+    local set = all[format_key]
     if type(set) ~= 'table' then
         return nil
     end
     return set
 end
 
----The parameters in force: defaults with any admin overrides applied.
+---The parameters in force for a format: its shipped values with any admin
+---overrides applied.
 ---
----Always a fresh table, including when nothing is overridden. Handing back
----`defaults` itself would be cheaper, but one caller poking a field would then
----silently rewrite the defaults for the rest of the session — and the callers
----are balance experiments, which is exactly the code that pokes fields.
+---Always a fresh table, including when nothing is overridden. Handing back a
+---shared table would be cheaper, but one caller poking a field would then
+---silently rewrite it for the rest of the session — and the callers are balance
+---experiments, which is exactly the code that pokes fields.
 ---
 ---An override of the wrong type is ignored rather than trusted: `storage`
 ---survives across versions, and a field that changed shape must not be able to
 ---feed a string into the evolution curve.
+---@param format_key string|nil Defaults to the format in force.
 ---@return FeedingParams
-function Public.get()
-    local set = overrides()
+function Public.get(format_key)
+    format_key = format_key or Public.current_key()
+    local set = overrides(format_key)
     local resolved = {}
     for key, value in pairs(defaults) do
+        local shipped = Public.default_for(key, format_key)
         local override = set and set[key]
         if override ~= nil and type(override) == type(value) then
             resolved[key] = override
         else
-            resolved[key] = value
+            resolved[key] = shipped
         end
     end
     return Public.clamp(resolved)
 end
 
----Set one parameter. Returns the stored value, or nil plus a reason.
+---Set one parameter for one format. Returns the stored value, or nil plus a
+---reason.
 ---@param key string Field name or symbol.
 ---@param raw string|number|boolean
+---@param format_key string|nil Defaults to the format in force.
 ---@return number|boolean|nil value
 ---@return string|nil error
-function Public.set(key, raw)
+function Public.set(key, raw, format_key)
+    format_key = format_key or Public.current_key()
     local field = Public.resolve_key(key)
     if not field then
         return nil, string.format('unknown parameter %q', key)
     end
 
-    local current = Public.get()
+    local current = Public.get(format_key)
     local value
     if type(defaults[field]) == 'boolean' then
         local text = string.lower(tostring(raw))
@@ -213,14 +382,18 @@ function Public.set(key, raw)
         -- Out of range is refused rather than clamped: an admin who typed a
         -- number is owed the reason it will not be taken, not a different one
         -- applied silently.
-        local low, high
-        if field == 'passive_power' then
-            low, high = Public.passive_power_bounds(current.evo_power)
-        else
-            low, high = limits[field].min, limits[field].max
-        end
+        local low, high = Public.bounds(field, current)
         if value < low or value > high then
             return nil, string.format('%s must be between %.4g and %.4g', field, low, high)
+        end
+        local step = steps[field]
+        if step and value % step ~= 0 then
+            return nil,
+                string.format(
+                    '%s must be a multiple of %d ticks — the global wave is offered once a minute, so nothing finer lands',
+                    field,
+                    step
+                )
         end
     end
 
@@ -230,7 +403,10 @@ function Public.set(key, raw)
     if type(storage.feeding_params) ~= 'table' then
         storage.feeding_params = {}
     end
-    storage.feeding_params[field] = value
+    if type(storage.feeding_params[format_key]) ~= 'table' then
+        storage.feeding_params[format_key] = {}
+    end
+    storage.feeding_params[format_key][field] = value
 
     -- `n` lives in (1, 1/p), so moving `p` moves the window under it. Drag it
     -- rather than leaving the pair somewhere no curve is defined; the caller
@@ -239,24 +415,34 @@ function Public.set(key, raw)
         local n_min, n_max = Public.passive_power_bounds(value)
         local dragged = math.min(math.max(current.passive_power, n_min), n_max)
         if dragged ~= current.passive_power then
-            storage.feeding_params.passive_power = dragged
+            storage.feeding_params[format_key].passive_power = dragged
         end
     end
     return value
 end
 
----Drop every override, returning the game to `defaults`.
-function Public.reset()
+---Drop one format's overrides, returning it to what the scenario ships.
+---@param format_key string
+function Public.reset(format_key)
+    if type(storage) ~= 'table' or type(storage.feeding_params) ~= 'table' then
+        return
+    end
+    storage.feeding_params[format_key] = nil
+end
+
+---Drop every format's overrides.
+function Public.reset_all()
     if type(storage) == 'table' then
         storage.feeding_params = nil
     end
 end
 
----True when `field` is currently overridden rather than defaulted.
+---True when `field` is overridden for `format_key` rather than shipped.
 ---@param field string
+---@param format_key string
 ---@return boolean
-function Public.is_overridden(field)
-    local set = overrides()
+function Public.is_overridden(field, format_key)
+    local set = overrides(format_key)
     return set ~= nil and set[field] ~= nil and type(set[field]) == type(defaults[field])
 end
 
@@ -325,6 +511,9 @@ end
 
 ---Passive threat income per second at `evo`. Anchored at zero: no evolution,
 ---no income.
+---
+---The format's multiplier is applied here rather than at the call sites, so
+---nothing downstream can compute an income that forgot about it.
 ---@param evo number
 ---@param params FeedingParams
 ---@return number
@@ -332,7 +521,8 @@ function Public.passive_threat(evo, params)
     if evo <= 0 then
         return 0
     end
-    return params.passive_scale * evo ^ Public.effective_passive_power(params) + params.passive_linear * evo
+    local income = params.passive_scale * evo ^ Public.effective_passive_power(params) + params.passive_linear * evo
+    return income * params.passive_income_scale
 end
 
 ---dE/dM at `evo` -- what the next unit of mutagen is worth in evolution.
@@ -355,6 +545,9 @@ end
 ---the margin. Both sides are per unit of mutagen, so the mutagen cancels and
 ---what is left is a time: 10 means a send lands like ten minutes of the income
 ---that same send also buys. This is the number the balance pass is tuning.
+---
+---Halving the income doubles this, which is the point of quoting it: it is what
+---a format's multiplier does to the worth of a send, in one number.
 ---@param evo number
 ---@param params FeedingParams
 ---@return number
@@ -366,11 +559,194 @@ function Public.instant_over_passive(evo, params)
     else
         passive_per_evo = params.passive_linear
     end
+    passive_per_evo = passive_per_evo * params.passive_income_scale
     local passive_per_minute = passive_per_evo * Public.evo_slope(evo, params) * 60
     if passive_per_minute <= 0 or passive_per_minute == math.huge then
         return 0
     end
     return params.instant_scale / passive_per_minute
+end
+
+-- ---------------------------------------------------------------------------
+-- Presentation.
+--
+-- Shared by the two things that can move these numbers -- /feeding-params and
+-- the Feeding tab -- so the two cannot drift into quoting a flask at different
+-- values. Everything here is pure: it formats a parameter set, it does not read
+-- or write the one in force.
+-- ---------------------------------------------------------------------------
+
+-- Evolutions the summary quotes at -- the span the balance is argued over.
+Public.quote_at = { 0.5, 1.0, 1.5, 2.5 }
+
+---Human-readable value, without Lua's trailing ".0" on whole numbers.
+---
+---Also the canonical text of a field: the panel fills its boxes with this and
+---calls a box unedited when it still reads back the same, so what counts as a
+---change is exactly what the admin can see.
+---@param value number|boolean
+---@return string
+function Public.show(value)
+    if type(value) == 'boolean' then
+        return value and 'true' or 'false'
+    end
+    if value == math.floor(value) and math.abs(value) < 1e15 then
+        return string.format('%d', value)
+    end
+    return (string.format('%.4f', value):gsub('0+$', ''):gsub('%.$', ''))
+end
+
+---The letter a field is called by in the formulas, or nil for the switch, which
+---has none. The long aliases are skipped -- they are for typing, not for naming.
+---@param field string
+---@return string|nil
+function Public.symbol(field)
+    for alias, target in pairs(aliases) do
+        if target == field and #alias <= 2 then
+            return alias
+        end
+    end
+    return nil
+end
+
+---The three formulas, with the numbers in force substituted in. The income
+---multiplier only appears when it is doing something, so the common case reads
+---as the plain sum it is.
+---@param params FeedingParams
+---@return string
+function Public.formulas(params)
+    local passive = string.format(
+        '%s·E^%s + %s·E',
+        Public.show(params.passive_scale),
+        Public.show(Public.effective_passive_power(params)),
+        Public.show(params.passive_linear)
+    )
+    if params.passive_income_scale ~= 1 then
+        passive = string.format('(%s) × %s', passive, Public.show(params.passive_income_scale))
+    end
+
+    return string.format(
+        'E = (M / %s) ^ %s%s   |   P = %s per sec   |   T = %s·M',
+        Public.show(params.evo_mutagen_at_100),
+        Public.show(params.evo_power),
+        params.evo_stop_scaling_at_100 and ', tangent past 100%' or ', power law throughout',
+        passive,
+        Public.show(params.instant_scale)
+    )
+end
+
+---What the curves come to at one evolution -- the row a candidate set is judged
+---on. `ratio` is the number the balance pass is actually tuning; see
+---`instant_over_passive`. Both already carry the format's multiplier, because
+---the curves themselves do.
+---@param evo number
+---@param params FeedingParams
+---@return { evo: number, mutagen: number, threat_per_minute: number, ratio: number }
+function Public.summary_at(evo, params)
+    return {
+        evo = evo,
+        mutagen = Public.mutagen_for_evo(evo, params),
+        threat_per_minute = Public.passive_threat(evo, params) * 60,
+        ratio = Public.instant_over_passive(evo, params),
+    }
+end
+
+---Every parameter of one format's set, one per line, marked where it has been
+---moved, followed by what the set comes to across the span.
+---@param params FeedingParams
+---@param format_key string Which set this is.
+---@param live string|nil What the match format is right now, for the header.
+---@return string
+function Public.report(params, format_key, live)
+    local lines = { '[feeding-params] ' .. Public.formulas(params) }
+    lines[#lines + 1] = string.format('  showing: %s%s', format_key, live and ('   |   live: ' .. live) or '')
+
+    for _, group in ipairs(groups) do
+        lines[#lines + 1] = '  — ' .. group.title
+        for _, field in ipairs(group.fields) do
+            local symbol = Public.symbol(field)
+            local shipped = Public.default_for(field, format_key)
+            lines[#lines + 1] = string.format(
+                '    %s%s = %s%s',
+                field,
+                symbol and (' (' .. symbol .. ')') or '',
+                Public.show(params[field]),
+                Public.is_overridden(field, format_key) and string.format('   [default %s]', Public.show(shipped)) or ''
+            )
+        end
+    end
+
+    local row = {}
+    for _, evo in ipairs(Public.quote_at) do
+        local at = Public.summary_at(evo, params)
+        row[#row + 1] = string.format(
+            '%d%%: %.0f mutagen, %.0f threat/min, ratio %.1f min',
+            at.evo * 100,
+            at.mutagen,
+            at.threat_per_minute,
+            at.ratio
+        )
+    end
+    lines[#lines + 1] = '  ' .. table.concat(row, ' | ')
+    return table.concat(lines, '\n')
+end
+
+-- ---------------------------------------------------------------------------
+-- Applying a change.
+--
+-- Not part of `set`, which is one field and nothing else. This is what has to
+-- happen around a retune however it was asked for, and it is shared so the
+-- command and the panel cannot do half of it each.
+-- ---------------------------------------------------------------------------
+
+---Tell both teams what moved, and re-derive anything that was computed from the
+---old constants.
+---
+---Announced rather than applied quietly: a retune moves what a send is worth
+---for both teams at once, and a silent one mid-game would read to players as
+---the scenario misbehaving.
+---@param lead string The first line, already naming who did what.
+---@param format_key string Which set was touched.
+local function announce(lead, format_key)
+    -- Required here rather than at the top of the file: match_format requires
+    -- this module at load, so a top-level require would close the loop.
+    local MatchFormat = require('maps.biter_battles_v2.match_format')
+
+    game.print(
+        lead .. '\n' .. Public.report(Public.get(format_key), format_key, MatchFormat.describe()),
+        { r = 1, g = 0.85, b = 0.2 }
+    )
+
+    -- bb_threat_income is only rewritten when someone feeds, so a retune of the
+    -- passive terms would otherwise keep paying the old rate until the next
+    -- send -- for minutes, silently, after an announcement saying it changed.
+    MatchFormat.refresh_threat_income()
+
+    -- Evolution is reconstructed from each team's *current* evolution on every
+    -- feed, so moving S or p re-prices future sends without moving anyone's
+    -- evolution now. Triple Threat keeps the raw mutagen instead and derives
+    -- evolution from it, so there the change is retroactive and the canonical
+    -- value has to be recomputed or the two would disagree until the next send.
+    if storage.tt_mode then
+        require('maps.biter_battles_v2.tt_mode').tt_recompute_all()
+        game.print('>> [feeding-params] Triple Threat is on — evolution recomputed from raw mutagen fed.')
+    end
+end
+
+---@param actor string Who moved them.
+---@param applied string[] Already formatted as "field = value".
+---@param format_key string Which set they moved.
+function Public.announce_changed(actor, applied, format_key)
+    announce(
+        string.format('>> [feeding-params] %s changed %s for %s', actor, table.concat(applied, ', '), format_key),
+        format_key
+    )
+end
+
+---@param actor string Who reset them.
+---@param format_key string Which set was reset.
+function Public.announce_reset(actor, format_key)
+    announce(string.format('>> [feeding-params] %s reset %s to defaults.', actor, format_key), format_key)
 end
 
 return Public
