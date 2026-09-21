@@ -79,8 +79,17 @@ local defaults = {
     -- Lowered from 25 (2026-09-17). Permanent and format-independent: the floor
     -- was carrying too much of the early game at every team size.
     passive_linear = 15,
-    instant_scale = 200,
-    passive_income_scale = 1,
+    -- 200 -> 260 (2026-09-22). Instant threat is the half of a send a team can
+    -- see coming and play around; the passive income it buys is the half it
+    -- cannot. Raising c shifts weight toward the former without touching what a
+    -- flask is worth in evolution.
+    instant_scale = 260,
+    -- 1 -> 0.9 (2026-09-22). A broad damp on passive income across the board,
+    -- left as a multiplier rather than folded into a and b so the curve
+    -- underneath stays the shape those constants describe. Note 1v1 is
+    -- unaffected: `format_defaults` REPLACES this rather than composing with
+    -- it, so 1v1 stays at 0.5 rather than becoming 0.45.
+    passive_income_scale = 0.9,
     attack_interval = TICKS_PER_MINUTE,
 }
 
@@ -101,8 +110,12 @@ local format_defaults = {
 
 Public.format_defaults = format_defaults
 
----The shipped value of a field for a format: its deviation if it has one, the
----base default otherwise.
+---What the scenario *ships* for a field in a format: its deviation if it has
+---one, the base default otherwise. Deliberately blind to anything an admin has
+---tuned, which is what makes it the number a reset returns to.
+---
+---For what a format actually falls back to in a running game -- which includes a
+---retuned base -- see `inherited_for`.
 ---@param field string
 ---@param format_key string
 ---@return number|boolean
@@ -320,8 +333,60 @@ local function overrides(format_key)
     return set
 end
 
----The parameters in force for a format: its shipped values with any admin
----overrides applied.
+---What `field` falls back to for a format that is not overriding it: the
+---format's shipped deviation, then the retuned base, then the shipped base.
+---
+---This layer is what makes `default` a base rather than a tenth sibling. The
+---common case -- "this number is wrong everywhere" -- is one command against
+---`default` instead of nine against each format.
+---
+---The shipped deviation sits ABOVE the retuned base on purpose. `format_defaults`
+---records what a format *must* do differently -- 1v1 halves the passive income
+---because two players hold the frontage a whole team otherwise holds -- and a
+---base retune quietly erasing that is the kind of thing nobody notices until the
+---match feels wrong. So a base change reaches every field a format has not
+---claimed, and none that it has. A format that would rather follow the base on
+---such a field can still say so by setting it explicitly.
+---@param field string
+---@param format_key string
+---@return number|boolean
+function Public.inherited_for(field, format_key)
+    local per_format = format_defaults[format_key]
+    if per_format and per_format[field] ~= nil then
+        return per_format[field]
+    end
+    if format_key ~= BASE_KEY then
+        local base = overrides(BASE_KEY)
+        local tuned = base and base[field]
+        -- The same type guard `get` applies: `storage` survives across versions.
+        if tuned ~= nil and type(tuned) == type(defaults[field]) then
+            return tuned
+        end
+    end
+    return defaults[field]
+end
+
+---True when a format is taking `field` from the retuned base rather than from
+---anything of its own or anything shipped. Reported, so an admin reading 1v1 can
+---tell why a number is not the one the scenario ships.
+---@param field string
+---@param format_key string
+---@return boolean
+function Public.is_inherited(field, format_key)
+    if format_key == BASE_KEY or Public.is_overridden(field, format_key) then
+        return false
+    end
+    local per_format = format_defaults[format_key]
+    if per_format and per_format[field] ~= nil then
+        return false
+    end
+    local base = overrides(BASE_KEY)
+    local tuned = base and base[field]
+    return tuned ~= nil and type(tuned) == type(defaults[field])
+end
+
+---The parameters in force for a format: what it inherits, with its own admin
+---overrides on top. `inherited_for` has the fallback chain.
 ---
 ---Always a fresh table, including when nothing is overridden. Handing back a
 ---shared table would be cheaper, but one caller poking a field would then
@@ -338,19 +403,59 @@ function Public.get(format_key)
     local set = overrides(format_key)
     local resolved = {}
     for key, value in pairs(defaults) do
-        local shipped = Public.default_for(key, format_key)
         local override = set and set[key]
         if override ~= nil and type(override) == type(value) then
             resolved[key] = override
         else
-            resolved[key] = shipped
+            resolved[key] = Public.inherited_for(key, format_key)
         end
     end
     return Public.clamp(resolved)
 end
 
+-- What an admin types to stop overriding a field rather than to give it a new
+-- value. Accepted anywhere a value is, so `/feeding-params 1v1 b=default` and an
+-- emptied box in the panel are one operation rather than two spellings of it.
+local clear_words = { default = true, inherit = true, reset = true, ['-'] = true }
+
+---@param raw any
+---@return boolean
+function Public.is_clear_word(raw)
+    return type(raw) == 'string' and clear_words[string.lower(raw)] == true
+end
+
+---Drop one field's override for one format, so it falls back to whatever it
+---inherits. Returns the value now in force.
+---
+---A set emptied of its last override is removed rather than left behind as an
+---empty table, so `storage.feeding_params` stays a record of what has actually
+---been moved and nothing downstream needs a special case for the husk.
+---@param key string Field name or symbol.
+---@param format_key string|nil Defaults to the format in force.
+---@return number|boolean|nil value
+---@return string|nil error
+function Public.clear(key, format_key)
+    format_key = format_key or Public.current_key()
+    local field = Public.resolve_key(key)
+    if not field then
+        return nil, string.format('unknown parameter %q', key)
+    end
+    local set = overrides(format_key)
+    if set then
+        set[field] = nil
+        if next(set) == nil then
+            storage.feeding_params[format_key] = nil
+        end
+    end
+    return Public.get(format_key)[field]
+end
+
 ---Set one parameter for one format. Returns the stored value, or nil plus a
 ---reason.
+---
+---A clear word in place of a value drops the override instead, which is how a
+---single parameter is returned to what it inherits without resetting the set
+---around it.
 ---@param key string Field name or symbol.
 ---@param raw string|number|boolean
 ---@param format_key string|nil Defaults to the format in force.
@@ -361,6 +466,12 @@ function Public.set(key, raw, format_key)
     local field = Public.resolve_key(key)
     if not field then
         return nil, string.format('unknown parameter %q', key)
+    end
+
+    -- Routed here rather than handled by each caller, so the command and the
+    -- panel cannot end up meaning different things by an erased value.
+    if Public.is_clear_word(raw) then
+        return Public.clear(field, format_key)
     end
 
     local current = Public.get(format_key)
@@ -665,13 +776,21 @@ function Public.report(params, format_key, live)
         lines[#lines + 1] = '  — ' .. group.title
         for _, field in ipairs(group.fields) do
             local symbol = Public.symbol(field)
-            local shipped = Public.default_for(field, format_key)
+            -- Not the shipped number but the one a clear would actually produce:
+            -- an admin about to undo a change is owed where it lands, and with a
+            -- retuned base underneath, the two are no longer the same.
+            local note = ''
+            if Public.is_overridden(field, format_key) then
+                note = string.format('   [%s if cleared]', Public.show(Public.inherited_for(field, format_key)))
+            elseif Public.is_inherited(field, format_key) then
+                note = '   [from default]'
+            end
             lines[#lines + 1] = string.format(
                 '    %s%s = %s%s',
                 field,
                 symbol and (' (' .. symbol .. ')') or '',
                 Public.show(params[field]),
-                Public.is_overridden(field, format_key) and string.format('   [default %s]', Public.show(shipped)) or ''
+                note
             )
         end
     end

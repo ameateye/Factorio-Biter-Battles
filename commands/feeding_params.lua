@@ -9,6 +9,13 @@
 -- format in front of it. Without one it is the format being played -- which on
 -- a server with no league match is `default`.
 --
+-- `default` is also the base the rest inherit from. A format stores only the
+-- parameters it has been given explicitly and takes everything else from
+-- `default`, so `/feeding-params b=12` moves b everywhere, and
+-- `/feeding-params 1v1 b=7.5` then holds 1v1 apart from it until b is cleared.
+-- `all` remains for the rarer intent of writing a number into all nine as their
+-- own, which a later change to the base will not move.
+--
 --   /feeding-params                       show the set in force
 --   /feeding-params 1v1                   show 1v1's set, whatever is being played
 --   /feeding-params c=48.7 n=2.5          retune the set in force, by symbol or name
@@ -16,7 +23,9 @@
 --   /feeding-params 1v1 b=7.5             retune 1v1 specifically
 --   /feeding-params 1v1 k=0.5             k is the passive income multiplier
 --   /feeding-params 2v2 interval=7200     ticks between waves; 3600 is one a minute
---   /feeding-params all b=12              the same change to every format
+--   /feeding-params all b=12              pin b on every format individually
+--   /feeding-params 1v1 b=default         stop overriding b on 1v1, so it
+--                                         follows `default` again
 --   /feeding-params reset                 the set in force, back to defaults
 --   /feeding-params 3v3 reset             one format, back to defaults
 --   /feeding-params all reset             every format
@@ -117,7 +126,12 @@ local function feeding_params(cmd)
             end
             stored = result
         end
-        applied[#applied + 1] = string.format('%s = %s', FeedingParams.resolve_key(key), FeedingParams.show(stored))
+        applied[#applied + 1] = string.format(
+            '%s = %s%s',
+            FeedingParams.resolve_key(key),
+            FeedingParams.show(stored),
+            FeedingParams.is_clear_word(value) and ' (inherited)' or ''
+        )
     end
 
     FeedingParams.announce_changed(actor, applied, target or keys[1])
@@ -125,7 +139,7 @@ end
 
 commands.add_command(
     'feeding-params',
-    'Show the feeding curve constants for a match format; admins can retune them. Usage: /feeding-params [1v1|all] [reset | key=value ...]',
+    'Show the feeding curve constants for a match format; admins can retune them. Usage: /feeding-params [1v1|all] [reset | key=value | key=default ...]',
     function(cmd)
         Utils.safe_wrap_cmd(cmd, feeding_params, cmd)
     end

@@ -38,11 +38,14 @@ local STATUS = 'bb_feeding_params_status'
 local APPLY = 'bb_feeding_params_apply'
 local RESET = 'bb_feeding_params_reset'
 local INPUT_PREFIX = 'bb_feeding_params_in_'
+local ROW_PREFIX = 'bb_feeding_params_row_'
+local CLEAR_PREFIX = 'bb_feeding_params_clear_'
 
 local HEADING_COLOR = { 0.55, 0.55, 0.99 }
 local HEADER_COLOR = { 0.88, 0.88, 0.99 }
 local VALUE_COLOR = { 0.9, 0.9, 0.9 }
 local MOVED_COLOR = { 1, 0.85, 0.2 }
+local INHERITED_COLOR = { 0.6, 0.78, 1 }
 local MUTED_COLOR = { 0.7, 0.7, 0.7 }
 local ERROR_COLOR = { 1, 0.35, 0.35 }
 local OK_COLOR = { 0.4, 0.9, 0.4 }
@@ -50,7 +53,16 @@ local OK_COLOR = { 0.4, 0.9, 0.4 }
 local ROW_HEIGHT = 24
 
 local SELECTOR_TOOLTIP = 'Each match format carries its own set of these numbers, so retuning one leaves every other'
-    .. ' format exactly where it was. The format being played is marked. A server with no league match plays "default".'
+    .. ' format exactly where it was. "default" is the exception: it is both what a server with no league match plays'
+    .. ' and the base the others inherit from, so moving a number there moves it for every format that has not claimed'
+    .. ' that parameter for itself. The format being played is marked.'
+
+-- Under a retuned base, "the default" and "what the scenario ships" stop being
+-- the same number. The column shows the first, because that is the one emptying
+-- a box actually produces.
+local DEFAULT_TOOLTIP = 'What this parameter falls back to if this format stops overriding it: the format own shipped'
+    .. ' deviation if it has one, otherwise whatever the "default" set has been tuned to, otherwise the number the'
+    .. ' scenario ships. Empty a box and Apply to drop back to it.'
 
 -- Position of each format key in the dropdown, which is how a selection is
 -- turned back into a key.
@@ -76,9 +88,19 @@ local descriptions = {
 -- The parameter table. "In force" is the column to read; "New value" is only what
 -- has been typed and not applied yet, which is why the two are separate rather
 -- than one editable cell that would lie about the state of the game.
-local ADMIN_COLUMNS =
-    { { 230, 'Parameter' }, { 90, 'In force' }, { 110, 'New value' }, { 80, 'Default' }, { 110, 'Range' } }
-local READONLY_COLUMNS = { { 230, 'Parameter' }, { 90, 'In force' }, { 80, 'Default' }, { 110, 'Range' } }
+local ADMIN_COLUMNS = {
+    { 230, 'Parameter' },
+    { 90, 'In force' },
+    { 110, 'New value' },
+    { 80, 'Default', DEFAULT_TOOLTIP },
+    { 110, 'Range' },
+}
+local READONLY_COLUMNS = {
+    { 230, 'Parameter' },
+    { 90, 'In force' },
+    { 80, 'Default', DEFAULT_TOOLTIP },
+    { 110, 'Range' },
+}
 
 -- The summary is transposed against the parameter table -- evolution across,
 -- metric down -- because the span is four wide and only three deep, and this way
@@ -189,7 +211,7 @@ end
 local function fill_params(t, params, admin, format_key)
     local columns = admin and ADMIN_COLUMNS or READONLY_COLUMNS
     for _, column in ipairs(columns) do
-        header(t, column[2], nil, column[1])
+        header(t, column[2], column[3], column[1])
     end
 
     for _, group in ipairs(FeedingParams.groups) do
@@ -200,20 +222,32 @@ local function fill_params(t, params, admin, format_key)
             local name = string.format('%s%s [img=info]', field, symbol and (' (' .. symbol .. ')') or '')
             cell(t, name, VALUE_COLOR, columns[1][1], descriptions[field])
 
+            -- Three states worth telling apart: this format's own number, a
+            -- number coming from the retuned base, and the one the scenario
+            -- ships. Only the first is undone by resetting this format.
             local moved = FeedingParams.is_overridden(field, format_key)
+            local inherited = FeedingParams.is_inherited(field, format_key)
             cell(
                 t,
-                FeedingParams.show(params[field]),
-                moved and MOVED_COLOR or VALUE_COLOR,
+                FeedingParams.show(params[field]) .. (inherited and ' *' or ''),
+                moved and MOVED_COLOR or (inherited and INHERITED_COLOR or VALUE_COLOR),
                 columns[2][1],
-                moved and 'Moved from the default.' or nil
+                moved and 'Set for this format. Empty the box and Apply to drop back to the Default column.'
+                    or (inherited and 'Not set for this format - following the retuned "default" set.' or nil)
             )
 
             if admin then
+                -- The control and its reset share one cell. Factorio tables have
+                -- no column spanning, and a sixth column carrying one small
+                -- button would cost more width than a tab this tall has to give.
+                local row = t.add({ type = 'flow', name = ROW_PREFIX .. field, direction = 'horizontal' })
+                row.style.vertical_align = 'center'
+                row.style.horizontal_spacing = 2
+
                 if type(FeedingParams.defaults[field]) == 'boolean' then
-                    t.add({ type = 'checkbox', name = INPUT_PREFIX .. field, state = params[field] })
+                    row.add({ type = 'checkbox', name = INPUT_PREFIX .. field, state = params[field] })
                 else
-                    local box = t.add({
+                    local box = row.add({
                         type = 'textfield',
                         name = INPUT_PREFIX .. field,
                         text = FeedingParams.show(params[field]),
@@ -221,17 +255,39 @@ local function fill_params(t, params, admin, format_key)
                         allow_decimal = not FeedingParams.steps[field],
                         allow_negative = false,
                     })
-                    box.style.width = 90
+                    box.style.width = 76
                     box.style.height = ROW_HEIGHT
                 end
+
+                -- Disabled rather than omitted when there is nothing to drop, so
+                -- the column keeps its shape as rows are moved and cleared, and
+                -- so the button itself reports whether this format is holding
+                -- this number.
+                local clear = row.add({
+                    type = 'sprite-button',
+                    name = CLEAR_PREFIX .. field,
+                    sprite = 'utility/reset_white',
+                    style = 'tool_button',
+                    enabled = moved,
+                    tooltip = moved
+                            and string.format(
+                                'Drop this format\'s %s and fall back to %s. Takes effect at once and is announced,'
+                                    .. ' like any other retune.',
+                                field,
+                                FeedingParams.show(FeedingParams.inherited_for(field, format_key))
+                            )
+                        or string.format('%s is not set for this format — nothing to drop.', field),
+                })
+                clear.style.size = ROW_HEIGHT
+                clear.style.padding = 0
             end
 
-            -- The default column is this format's shipped value, not the base
-            -- one: 1v1 ships a different income multiplier, and calling the base
-            -- number its default would mark an untouched set as moved.
+            -- Where emptying this box would land, not what the scenario ships:
+            -- with a retuned base underneath, naming the shipped number would be
+            -- naming a value a clear does not produce.
             cell(
                 t,
-                FeedingParams.show(FeedingParams.default_for(field, format_key)),
+                FeedingParams.show(FeedingParams.inherited_for(field, format_key)),
                 MUTED_COLOR,
                 columns[admin and 4 or 3][1]
             )
@@ -324,7 +380,9 @@ local function build(player, frame)
             type = 'button',
             name = APPLY,
             caption = 'Apply',
-            tooltip = 'Apply every box that differs from the value in force, to the format selected above. Announced to both teams.',
+            tooltip = 'Apply every box that differs from the value in force, to the format selected above. An emptied'
+                .. ' box stops this format overriding that parameter, dropping it back to the Default column.'
+                .. ' Announced to both teams.',
         })
         buttons.add({
             type = 'button',
@@ -434,7 +492,8 @@ end
 ---@param field string
 ---@return string|nil
 local function typed_value(inputs, field)
-    local element = inputs[INPUT_PREFIX .. field]
+    local row = inputs[ROW_PREFIX .. field]
+    local element = row and row.valid and row[INPUT_PREFIX .. field] or nil
     if not (element and element.valid) then
         return nil
     end
@@ -474,7 +533,17 @@ Gui.on_click(APPLY, function(event)
     for _, field in ipairs(FeedingParams.order) do
         local typed = typed_value(inputs, field)
         local before = FeedingParams.get(format_key)
-        if typed and typed ~= FeedingParams.show(before[field]) then
+        if typed == '' then
+            -- An emptied box reads as "this format should stop having an opinion
+            -- about this number", not as zero -- the boxes are numeric, so there
+            -- is no word to type and this is the only gesture available. Guarded
+            -- on the format actually holding an override, so blanking a row that
+            -- was already inheriting is not announced as a change.
+            if FeedingParams.is_overridden(field, format_key) then
+                local stored = FeedingParams.clear(field, format_key)
+                applied[#applied + 1] = string.format('%s = %s (inherited)', field, FeedingParams.show(stored))
+            end
+        elseif typed and typed ~= FeedingParams.show(before[field]) then
             local stored, err = FeedingParams.set(field, typed, format_key)
             if err then
                 errors[#errors + 1] = err
@@ -518,5 +587,43 @@ Gui.on_click(RESET, function(event)
     refresh_open_panels()
     set_status(player, 'Reset ' .. format_key .. ' to defaults.', OK_COLOR)
 end)
+
+-- One registration per field rather than one handler matching a prefix: the
+-- dispatcher keys on the exact element name, and nine names is cheaper than
+-- teaching it patterns. Bound at load, so every panel drawn later is covered.
+for _, field in ipairs(FeedingParams.order) do
+    Gui.on_click(CLEAR_PREFIX .. field, function(event)
+        local player = event.player
+        if not is_admin(player) then
+            return
+        end
+        local root = find_root(event.element)
+        if not root then
+            return
+        end
+        local format_key = selected_key(root)
+
+        -- Drawn disabled when there is nothing to drop, but a click can still
+        -- arrive from a panel that was open when someone else cleared the same
+        -- row. Redraw rather than announce a change that did not happen.
+        if not FeedingParams.is_overridden(field, format_key) then
+            refresh_open_panels()
+            return
+        end
+
+        local stored = FeedingParams.clear(field, format_key)
+        FeedingParams.announce_changed(
+            player.name,
+            { string.format('%s = %s (inherited)', field, FeedingParams.show(stored)) },
+            format_key
+        )
+        refresh_open_panels()
+        set_status(
+            player,
+            string.format('Dropped %s from %s — now %s.', field, format_key, FeedingParams.show(stored)),
+            OK_COLOR
+        )
+    end)
+end
 
 comfy_panel_tabs[TAB_NAME] = { gui = build, admin = false }
