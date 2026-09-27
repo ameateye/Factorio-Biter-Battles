@@ -27,9 +27,9 @@ Public.CANONICAL_KIT_OFFSET = { x = 6, y = -6 }
 
 ---Where a team's power chest and energy interface sit relative to ITS silo:
 ---the canonical offset carried into the team's square (reflected with two
----teams, turned k quarter turns on the four-square map).
+---teams, mirrored or half-turned by quadrant on the four-square map).
 ---
----`from_canonical` is linear -- a swap and a negation, never a cosine -- so
+---`from_canonical` is linear -- a negation, never a cosine -- so
 ---applying it to a difference of positions is the same transform as applying
 ---it to a position, and with two teams it returns the integers -6 and 6
 ---themselves.

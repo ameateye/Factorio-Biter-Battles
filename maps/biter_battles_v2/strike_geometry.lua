@@ -6,7 +6,7 @@
 -- `ai_strikes.lua`, which requires `utils.event`, `defines` and the multi-silo
 -- special at load and so cannot be read by a unit test. The four-square map
 -- needs a second boundary, an arc intersection that can come out empty and a
--- rotation per team -- all of it pure arithmetic, all of it worth pinning. So
+-- transform per team -- all of it pure arithmetic, all of it worth pinning. So
 -- the new arithmetic lives here, reachable from `tests/test-strike-geometry.lua`,
 -- and the legacy functions stay in `ai_strikes.lua` exactly as they are: this
 -- module is only ever reached when the round is NOT playing `horizontal2`.
@@ -15,11 +15,11 @@
 -- side cut at x = 0, the quadrant x < 0 and y < 0. Its MAIN river -- the one the
 -- enemy is across -- runs along y = 0, its SIDE river along x = 0, both of half
 -- width `border_river_width / 2`, and its biters live far up, at very negative
--- y. Team k's zone is that quadrant turned k quarter turns clockwise, so a
+-- y. Team k's zone is that quadrant under transform k (mirrored or half-turned), so a
 -- question about team k is answered by turning the question into the canonical
 -- frame (`Layout.to_canonical`), answering it there, and turning the answer back
 -- (`Layout.from_canonical`). Both are exact: components are swapped and negated,
--- never multiplied by a cosine, so the answer for team k is the exact rotation
+-- never multiplied by a cosine, so the answer for team k is the exact image
 -- of the answer for the canonical team.
 --
 -- THE FOLDED FRAME is the legacy one. `ai_strikes.lua:154-165` folds the world
@@ -446,7 +446,7 @@ end
 ---The canonical waypoint is the canonical target plus the canonical attack
 ---vector scaled by the wave's distance modifier -- the arithmetic of
 ---`ai_strikes.lua:216-219`, in the frame where the attack vectors were drawn.
----Turning the waypoint by k quarter turns is the same as turning the vector by k
+---Transforming the waypoint by k is the same as transforming the vector by k
 ---and adding it in the world frame, which is why the four-square map needs no
 ---per-team copy of the vector table.
 ---

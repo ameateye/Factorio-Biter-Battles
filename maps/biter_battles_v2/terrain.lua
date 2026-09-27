@@ -1205,7 +1205,7 @@ local function draw_spawn_island(surface, cross4)
     if not cross4 then
         -- The two-team map draws the north-west quarter and duplicates it to the
         -- north-east, the mirror clone bringing the southern half. On the
-        -- four-square map the rotation clones bring the other three quarters, so
+        -- four-square map the mirror clones bring the other three quarters, so
         -- the canonical one is drawn alone.
         for i = 1, #tiles, 1 do
             table_insert(
@@ -1445,7 +1445,7 @@ local function generate_spawn_ore(surface, rng, cross4)
     }
 
     if cross4 then
-        -- The four-square map draws the canonical quadrant and the rotation
+        -- The four-square map draws the canonical quadrant and the mirror
         -- clones carry it to the others, so the grid moves west of the side
         -- river: the same three rows, and four columns with cx < 0 instead of
         -- five across the axis. [-1,-1] is dropped for the reason [0,-1] is
@@ -1601,8 +1601,8 @@ end
 ---
 ---`Public.generate_initial_structures` draws the whole north half and lets the
 ---mirror clone carry it south. This draws the top-left quarter and lets the
----rotation clones carry it into the other quadrants, so every team's base is the
----same base turned -- by construction, not by a second generation.
+---mirror clones carry it into the other quadrants, so every team's base is the
+---same base mirrored -- by construction, not by a second generation.
 ---
 ---The order is the legacy one, step for step, and for the legacy reasons:
 ---
@@ -1676,14 +1676,14 @@ end
 ---True for a TILE of the four-square map that no landfill may cover: the water
 ---of the cross.
 ---
----Every quadrant is the canonical one turned, so the question is asked in the
----canonical frame: the tile is unrotated by the quarter turns of its own
----quadrant (`unrotate_tile`, the cell transform the clone pipeline turns the
+---Every quadrant is the canonical one mirrored, so the question is asked in the
+---canonical frame: the tile is taken back through the transform of its own
+---quadrant (`unrotate_tile`, the cell transform the clone pipeline moves the
 ---terrain with -- not `unrotate_position`, which would answer for the tile next
 ---door on the axis that gets negated) and then handed to the two river
 ---predicates above. The front river covers the central lake, which is
 ---the same disc in every frame (`tile_distance_to_center` is invariant under the
----cell turn), so the spectator island stays landfill-proof exactly as it is
+---cell transform), so the spectator island stays landfill-proof exactly as it is
 ---today.
 ---
 ---A closed quadrant -- the fourth one of a three-team round -- is water from end

@@ -45,11 +45,11 @@ local size_of_vectors = #attack_vectors.north
 --The set the four-square map turns for every team: the very list the loop above
 --filled for the canonical team -- the first of the ring, the team whose zone
 --`layout.lua` turns onto the other three -- reached through the registry rather
---than by name. Turning a vector by k quarter turns and adding it in the world
---frame is the same as adding it in the canonical frame and turning the waypoint,
+--than by name. Transforming a vector by quadrant k and adding it in the world
+--frame is the same as adding it in the canonical frame and transforming the waypoint,
 --so the cross path works canonically and needs no per-team copy of the table
---(and must not read the `south` set for it: that one is a REFLECTION of the
---canonical set, which is the two-team map's transform, not the pinwheel's).
+--(and must not read the `south` set for it: that one is the two-team map's
+--own table, and `from_canonical` already mirrors the canonical set per team).
 local canonical_attack_vectors = attack_vectors[Teams.roster()[1]]
 
 local function calculate_secant_intersections(r, a, b, c)

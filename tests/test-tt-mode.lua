@@ -58,20 +58,20 @@ function test_two_teams_keep_the_hardcoded_offsets()
     assert_offset('south: the reflection of it', 6, 6, Model.kit_offset(teams[2]))
 end
 
-function test_four_teams_turn_the_canonical_offset()
+function test_four_teams_mirror_the_canonical_offset()
     round_of(4)
     local teams = Teams.all()
     assert_offset('north is the canonical square', 6, -6, Model.kit_offset(teams[1]))
-    assert_offset('east is one quarter turn on', 6, 6, Model.kit_offset(teams[2]))
-    assert_offset('south is two', -6, 6, Model.kit_offset(teams[3]))
-    assert_offset('west is three', -6, -6, Model.kit_offset(teams[4]))
+    assert_offset('east is its mirror through x = 0', -6, -6, Model.kit_offset(teams[2]))
+    assert_offset('south is the half turn', -6, 6, Model.kit_offset(teams[3]))
+    assert_offset('west is the mirror through y = 0', 6, 6, Model.kit_offset(teams[4]))
 end
 
 function test_three_teams_place_the_three_squares_that_play()
     round_of(3)
     local teams = Teams.all()
     lunatest.assert_equal(3, #teams)
-    assert_offset('the third team is still two quarter turns on', -6, 6, Model.kit_offset(teams[3]))
+    assert_offset('the third team is still the half turn', -6, 6, Model.kit_offset(teams[3]))
     lunatest.assert_nil(Model.kit_offset('nobody'), 'a name that is not a team has no square')
 end
 

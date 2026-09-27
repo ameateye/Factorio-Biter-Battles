@@ -11,38 +11,49 @@
 -- y = 0. Every other zone is that one moved by a member of the layout's
 -- transform group:
 --
---   * 'cross4' (three or four teams) turns it k quarter turns CLOCKWISE, with
---     k = `Teams.k_of(team)`: north 0 (top left), east 1 (top right), south 2
---     (bottom right), west 3 (bottom left) -- the pinwheel,
---     where a team's name is the direction its own biters come from. With three
---     teams the bottom-left quadrant is closed: water, no team.
+--   * 'cross4' (three or four teams) moves it by the transform of quadrant k,
+--     k = `Teams.k_of(team)`: north 0 (top left) keeps it, east 1 (top right) is
+--     its mirror image through x = 0, south 2 (bottom right) is it turned half
+--     a turn, west 3 (bottom left) is its mirror image through y = 0. So the
+--     top row is one picture and its left-right mirror, and the bottom row is
+--     the top row upside down: the two top teams' biters come from the north,
+--     the two bottom teams' from the south, and the horizontal river is every
+--     team's front river, as on the two-team map. With three teams the
+--     bottom-left quadrant is closed: water, no team.
 --   * 'horizontal2' (two teams, today's map) leaves the first team's zone alone
---     and reflects it through y = 0 for the second. That layout is NOT a special
---     case of the cross -- a reflection is not a rotation -- and its generator is
+--     and reflects it through y = 0 for the second. Its second team is the
+--     cross's bottom-left transform over the whole half plane, but its generator is
 --     not rewritten: this module only
 --     answers for it the questions a caller can ask without re-deriving terrain.
 --
--- Factorio coordinates: x grows to the east, y grows to the SOUTH, so the
--- clockwise quarter turn is R(x, y) = (-y, x). It sends the north direction
--- (0, -1) to east (1, 0) and the canonical quadrant onto x > 0, y < 0.
+-- Factorio coordinates: x grows to the east, y grows to the SOUTH. The four
+-- transforms, T_k for quadrant k, are
+--
+--     T_0(x, y) = (x, y)      T_1(x, y) = (-x, y)
+--     T_3(x, y) = (x, -y)     T_2(x, y) = (-x, -y)
+--
+-- and T_k sends the canonical quadrant onto quadrant k. Each is its own
+-- inverse, and together they are a group (the Klein four-group, T_1 T_3 = T_2),
+-- not a cyclic one: `k` is a quadrant number, not a turn count. The functions
+-- keep the names `rotate_*` / `unrotate_*` from when the group was the quarter
+-- turns; `unrotate_*` is now the same map as `rotate_*`.
 --
 -- Tiles and chunks are CELLS, not points: tile (tx, ty) is the half-open square
--- [tx, tx+1) x [ty, ty+1). Its image under R is (-ty-1, -ty] x [tx, tx+1), and
--- the cell covering that image starts at -ty - 1, so
+-- [tx, tx+1) x [ty, ty+1). Its image under x -> -x is (-tx-1, -tx] x [ty, ty+1),
+-- and the cell covering that image starts at -tx - 1, so
 --
---     R(tx, ty) = (-ty - 1, tx)
+--     T_1(tx, ty) = (-tx - 1, ty)
 --
 -- -- the -1 rides on the axis that becomes negative, exactly as the legacy
 -- `-y - 1` of `mirror_terrain.lua:141-156` does for the reflection. A chunk is a
--- cell of the same lattice scaled by 32 and takes the SAME formula: R maps a
+-- cell of the same lattice scaled by 32 and takes the SAME formula: T_k maps a
 -- chunk-aligned 32x32 box onto a chunk-aligned 32x32 box, tile for tile, which
--- is the property the clone pipeline needs and the
--- reason a three-fold map is impossible.
+-- is the property the clone pipeline needs.
 --
 -- Everything here is a pure function of its arguments plus the round's layout
 -- and roster, read from `teams.lua`. No `game`, no event, no write to `storage`
--- of its own, and no floating-point rotation: positions are swapped and negated,
--- tiles and chunks are integer arithmetic, directions are `(d + 4k) % 16`. A
+-- of its own, and no floating-point arithmetic: positions are negated, tiles
+-- and chunks are integer arithmetic, directions are negated or offset mod 16. A
 -- component that comes out as zero may be the IEEE negative zero, since it is
 -- produced by negating a zero; it compares equal to 0 and adds like 0, so no
 -- consumer can tell.
@@ -79,43 +90,55 @@ local function is_cross4()
 end
 
 -- ---------------------------------------------------------------------------
--- The transform group: quarter turns of positions, tiles, chunks, directions
+-- The transform group: each quadrant's transform of positions, tiles, chunks
+-- and directions
 -- ---------------------------------------------------------------------------
 
----`k` clockwise quarter turns of a continuous position about the origin. Exact:
----the components are swapped and negated, never multiplied by a cosine.
+---Whether quadrant k's transform negates x, and whether it negates y. Quadrant 1
+---(top right) is the mirror through x = 0, quadrant 3 (bottom left) the mirror
+---through y = 0, and quadrant 2 (bottom right) both, which is the half turn.
+---@param k integer Any integer; only `k % 4` matters.
+---@return boolean flip_x
+---@return boolean flip_y
+local function flips_of(k)
+    local quadrant = k % 4
+    return quadrant == 1 or quadrant == 2, quadrant == 2 or quadrant == 3
+end
+
+---Quadrant `k`'s transform of a continuous position. Exact: the components are
+---negated, never multiplied by anything.
 ---@param k integer Any integer; only `k % 4` matters.
 ---@param x number
 ---@param y number
 ---@return number x
 ---@return number y
 function Public.rotate_position(k, x, y)
-    local turns = k % 4
-    if turns == 0 then
-        return x, y
-    elseif turns == 1 then
-        return -y, x
-    elseif turns == 2 then
-        return -x, -y
+    local flip_x, flip_y = flips_of(k)
+    if flip_x then
+        x = -x
     end
-    return y, -x
+    if flip_y then
+        y = -y
+    end
+    return x, y
 end
 
----The inverse of `rotate_position`, i.e. `k` quarter turns anticlockwise.
+---The inverse of `rotate_position`. Every transform of the group is its own
+---inverse, so this is `rotate_position` again.
 ---@param k integer
 ---@param x number
 ---@param y number
 ---@return number x
 ---@return number y
 function Public.unrotate_position(k, x, y)
-    return Public.rotate_position(4 - k % 4, x, y)
+    return Public.rotate_position(k, x, y)
 end
 
----`k` clockwise quarter turns of a TILE.
+---Quadrant `k`'s transform of a TILE.
 ---
----A tile is the cell [tx, tx+1) x [ty, ty+1), so the turn that sends the point
----(x, y) to (-y, x) sends the tile (tx, ty) to (-ty - 1, tx): the image of the
----cell is (-ty-1, -ty] x [tx, tx+1) and the tile covering it starts at -ty - 1.
+---A tile is the cell [tx, tx+1) x [ty, ty+1), so the mirror that sends the point
+---x to -x sends the tile column tx to -tx - 1: the image of [tx, tx+1) is
+---(-tx-1, -tx] and the tile covering it starts at -tx - 1. The same for y.
 ---Integer in, integer out.
 ---@param k integer Any integer; only `k % 4` matters.
 ---@param tx integer
@@ -123,32 +146,31 @@ end
 ---@return integer tx
 ---@return integer ty
 function Public.rotate_tile(k, tx, ty)
-    local turns = k % 4
-    if turns == 0 then
-        return tx, ty
-    elseif turns == 1 then
-        return -ty - 1, tx
-    elseif turns == 2 then
-        return -tx - 1, -ty - 1
+    local flip_x, flip_y = flips_of(k)
+    if flip_x then
+        tx = -tx - 1
     end
-    return ty, -tx - 1
+    if flip_y then
+        ty = -ty - 1
+    end
+    return tx, ty
 end
 
----The inverse of `rotate_tile`.
+---The inverse of `rotate_tile`: `rotate_tile` again.
 ---@param k integer
 ---@param tx integer
 ---@param ty integer
 ---@return integer tx
 ---@return integer ty
 function Public.unrotate_tile(k, tx, ty)
-    return Public.rotate_tile(4 - k % 4, tx, ty)
+    return Public.rotate_tile(k, tx, ty)
 end
 
----`k` clockwise quarter turns of a CHUNK.
+---Quadrant `k`'s transform of a CHUNK.
 ---
 ---A chunk is a cell of the 32-tile lattice, so it takes the very same formula as
----a tile. The two agree: the 1024 tiles of a chunk turn onto the 1024 tiles of
----the turned chunk, which is what lets the clone pipeline move whole chunks --
+---a tile. The two agree: the 1024 tiles of a chunk land on the 1024 tiles of
+---the image chunk, which is what lets the clone pipeline move whole chunks --
 ---its scratch buffer is exactly 32 x 32 tiles long (`mirror_terrain.lua:133-139`)
 ---and `:147` asserts that the area fills it.
 ---@param k integer Any integer; only `k % 4` matters.
@@ -160,34 +182,43 @@ function Public.rotate_chunk(k, cx, cy)
     return Public.rotate_tile(k, cx, cy)
 end
 
----The inverse of `rotate_chunk`.
+---The inverse of `rotate_chunk`: `rotate_chunk` again.
 ---@param k integer
 ---@param cx integer
 ---@param cy integer
 ---@return integer cx
 ---@return integer cy
 function Public.unrotate_chunk(k, cx, cy)
-    return Public.rotate_tile(4 - k % 4, cx, cy)
+    return Public.rotate_tile(k, cx, cy)
 end
 
----`k` clockwise quarter turns of an entity direction. Factorio 2.0 has sixteen
----directions (north = 0, east = 4, south = 8, west = 12), so a quarter turn is
----+4 modulo 16. This replaces the eight-entry reflection table of
----`mirror_terrain.lua:6-15` for the four-square layout only -- that table is a
----reflection and stays the authority for the two-team map.
+---Quadrant `k`'s transform of an entity direction. Factorio 2.0 has sixteen
+---directions, clockwise from north = 0 (east = 4, south = 8, west = 12). The
+---mirror through x = 0 swaps east and west and keeps north: d -> -d. The mirror
+---through y = 0 swaps north and south and keeps east: d -> 8 - d. Both at once
+---is the half turn, d -> d + 8. All modulo 16. The y mirror is the eight-entry
+---table of `mirror_terrain.lua:6-15`, which stays the authority for the
+---two-team map.
 ---@param k integer Any integer; only `k % 4` matters.
 ---@param d integer
 ---@return integer d
 function Public.rotate_direction(k, d)
-    return (d + 4 * (k % 4)) % 16
+    local flip_x, flip_y = flips_of(k)
+    if flip_x then
+        d = -d
+    end
+    if flip_y then
+        d = 8 - d
+    end
+    return d % 16
 end
 
----The inverse of `rotate_direction`.
+---The inverse of `rotate_direction`: `rotate_direction` again.
 ---@param k integer
 ---@param d integer
 ---@return integer d
 function Public.unrotate_direction(k, d)
-    return Public.rotate_direction(4 - k % 4, d)
+    return Public.rotate_direction(k, d)
 end
 
 -- ---------------------------------------------------------------------------
@@ -196,7 +227,7 @@ end
 
 ---Which quadrant a cell or a point of the plane lies in: 0 is x < 0 and y < 0,
 ---the canonical one (top left), then clockwise 1 (top right), 2 (bottom right),
----3 (bottom left). `k` quarter turns send quadrant 0 onto quadrant k, so a
+---3 (bottom left). Transform `k` sends quadrant 0 onto quadrant k, so a
 ---quadrant number IS the `k` of the team whose zone it is.
 ---@param ax number
 ---@param ay number
@@ -241,9 +272,9 @@ function Public.quadrant_of_position(x, y)
     return quadrant_of(x, y)
 end
 
----The canonical member of a chunk's rotation orbit, and the turn that produces
+---The canonical member of a chunk's orbit, and the transform that produces
 ---this chunk from it: `ccx < 0`, `ccy < 0` and `rotate_chunk(k, ccx, ccy)` is
----`(cx, cy)` again. The quadrant number is that turn count, so the answer is one
+---`(cx, cy)` again. The quadrant number is that transform, so the answer is one
 ---`unrotate_chunk`.
 ---@param cx integer
 ---@param cy integer
@@ -259,10 +290,10 @@ end
 ---@class ChunkOrbitEntry
 ---@field x integer Chunk x.
 ---@field y integer Chunk y.
----@field k integer 0..3, the quarter turns from the canonical chunk to this one.
+---@field k integer 0..3, the transform from the canonical chunk to this one.
 
----The four chunks of a rotation orbit -- the canonical chunk turned 0, 1, 2 and
----3 times, one per quadrant. This is the list the cross terrain pipeline waits
+---The four chunks of an orbit -- the canonical chunk under transforms 0, 1, 2 and
+---3, one per quadrant. This is the list the cross terrain pipeline waits
 ---for before it clones.
 ---
 ---The array is 1-based, like every list of this scenario, so that `ipairs` walks
@@ -409,7 +440,7 @@ end
 -- only ever answer with an ACTIVE team. In 'horizontal2' only the two active
 -- teams have a zone, and everything else answers nil.
 
----A canonical POSITION placed in `team`'s zone. 'cross4': `k` quarter turns.
+---A canonical POSITION placed in `team`'s zone. 'cross4': transform `k`.
 ---'horizontal2': the first active team's zone is the canonical one (identity),
 ---the second is its reflection through y = 0 -- the transform the legacy mirror
 ---applies to entity positions (`mirror_terrain.lua:90-100`).
@@ -455,7 +486,7 @@ function Public.to_canonical(team, x, y)
 end
 
 ---A canonical TILE placed in `team`'s zone -- the cell transform, off-by-one
----included. 'cross4': `k` quarter turns. 'horizontal2': (tx, ty) for the first
+---included. 'cross4': transform `k`. 'horizontal2': (tx, ty) for the first
 ---active team and (tx, -ty - 1) for the second, which is the legacy
 ---`invert_tiles` (`mirror_terrain.lua:141-156`).
 ---
@@ -495,9 +526,9 @@ function Public.chunk_from_canonical(team, cx, cy)
 end
 
 ---An entity DIRECTION of the canonical zone as it must be built in `team`'s
----zone. 'cross4': `(d + 4k) % 16`.
+---zone. 'cross4': `rotate_direction(k, d)`.
 ---
----'horizontal2': returned UNCHANGED. The reflection is not a rotation, and
+---'horizontal2': returned UNCHANGED. The reflection's
 ---`direction_translation` (`mirror_terrain.lua:6-15`) is the authoritative table
 ---for that layout; it is deliberately not copied here, so the legacy clone path
 ---keeps exactly one definition of it and this module cannot drift from it.
@@ -521,7 +552,7 @@ end
 
 ---Where `team`'s players spawn. 'horizontal2': today's two literals in
 ---`Teams.all()` order, {0, -44} then {0, 44} (init.lua:141-150). 'cross4': the
----canonical spawn turned k times -- north {-44, -44}, east {44, -44}, south
+---canonical spawn under transform k -- north {-44, -44}, east {44, -44}, south
 ---{44, 44}, west {-44, 44}. A fresh table each call.
 ---@param team string
 ---@return MapPosition|nil
@@ -544,7 +575,7 @@ end
 
 ---The unit axis vector from `team`'s zone towards its FRONT river -- the one the
 ---enemy is across. For the canonical zone that is the river at y = 0, so {0, 1},
----turned k times in 'cross4': {-1, 0} for east, {0, -1} for south, {1, 0} for
+---under transform k in 'cross4': {0, 1} for east too, {0, -1} for south and
 ---west. In 'horizontal2' it is {0, 1} for the first active team and {0, -1} for
 ---the second.
 ---

@@ -33,7 +33,7 @@ local Teams = require('maps.biter_battles_v2.teams')
 
 local Public = {}
 
----The four-square map's squares, by the quarter turn that takes the canonical
+---The four-square map's squares, by the transform that takes the canonical
 ---zone to the team's own (`Teams.k_of`).
 ---
 ---`layout.lua` numbers the quadrants and says a quadrant number IS the `k` of

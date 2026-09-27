@@ -3,29 +3,30 @@
 -- line.
 --
 -- `mirror_terrain` reflects the north half onto the south (y -> -y). This module
--- turns the canonical quadrant `k` quarter turns clockwise onto the zone of the
--- team whose `k` that is -- north 0, east 1, south 2, west 3 (`layout.lua`).
--- The mechanism is the same one, for the same
--- reasons:
+-- carries the canonical quadrant onto the zone of the team of quadrant `k` by
+-- that quadrant's transform (`layout.lua`): mirrored through x = 0 for east
+-- (top right), half-turned for south (bottom right), mirrored through y = 0 for
+-- west (bottom left). The module keeps its name from when the transforms were
+-- quarter turns. The mechanism is the same one as `mirror_terrain`'s, for the
+-- same reasons:
 --
 --   * `surface.clone_area` copies the entities of a chunk-aligned 32x32 box onto
---     another one, TRANSLATED. Nothing in the engine can turn them, so the clone
---     is only a way of duplicating: `on_entity_cloned` then teleports each copy
---     from the translated position to the turned one, and `on_area_cloned`
---     re-emplaces the 1024 tiles and the decoratives at their turned cells.
+--     another one, TRANSLATED. Nothing in the engine can mirror them, so the
+--     clone is only a way of duplicating: `on_entity_cloned` then teleports each
+--     copy from the translated position to the mirrored one, and
+--     `on_area_cloned` re-emplaces the 1024 tiles and the decoratives at their
+--     mirrored cells.
 --   * tiles are therefore not cloned (`clone_tiles = false`); the engine would
 --     translate them too.
 --   * the destination entities are cleared by hand, because
 --     `clear_destination_entities` is unreliable (`mirror_terrain.lua:61-64`).
 --
--- A quarter turn maps the tile lattice onto itself and a chunk onto a chunk
--- (`layout.lua`), which is the property that lets the
--- whole mechanism survive the change of group -- and the reason a three-fold map
--- cannot use it.
+-- Every transform maps the tile lattice onto itself and a chunk onto a chunk
+-- (`layout.lua`), which is the property that lets the whole mechanism work.
 --
 -- ONE CLONE AT A TIME. `clone()` calls `clone_area`, and the engine raises
 -- `on_entity_cloned` for every entity of that area and then `on_area_cloned`
--- inside that call, so the module keeps the turn of the clone in progress and a
+-- inside that call, so the module keeps the transform of the clone in progress and a
 -- 1024-entry scratch buffer at module level -- the pattern of
 -- `mirror_terrain.lua:133-139`. Nothing here is re-entrant.
 --
@@ -195,13 +196,13 @@ function Public.rotate_entity(event)
         destination.direction = Layout.rotate_direction(k, destination.direction)
     end
 
-    -- Turn the entity's position around the origin, in relation to the source
-    -- entity: the clone is at the TRANSLATED position and this is the only step
-    -- that makes the quadrant a rotation rather than a copy.
+    -- Mirror the entity's position in relation to the source entity: the clone
+    -- is at the TRANSLATED position and this is the only step that makes the
+    -- quadrant a mirror image rather than a copy.
     local source_position = event.source.position
     if source_position.x == 0 or source_position.y == 0 then
-        -- Both axes are rivers on this map and a point of an axis turns onto
-        -- another axis, so nothing may stand there -- and `mirror_terrain.lua:92`
+        -- Both axes are rivers on this map and a point of an axis stays on
+        -- it, so nothing may stand there -- and `mirror_terrain.lua:92`
         -- destroys the entities of its own axis for the same reason.
         destination.destroy()
         return

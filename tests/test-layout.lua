@@ -8,18 +8,19 @@
 -- pipeline is built on exactly these answers. What it is here to catch:
 --
 --   * the CELL OFF-BY-ONE. A tile is the half-open square [tx,tx+1) x [ty,ty+1),
---     so the turn that sends the point (x, y) to (-y, x) sends the tile (tx, ty)
---     to (-ty-1, tx) and not to (-ty, tx). Three tests nail it down: the corners
---     of a tile land on the corners of the turned tile, every interior point of
---     a tile lands inside the turned tile, and the 1024 tiles of a chunk land
---     one per tile on the 1024 tiles of the turned chunk. A missing -1 slides a
---     whole quadrant by one tile, and the `#to_emplace == #tiles` assert of
+--     so the mirror that sends the point x to -x sends the tile column tx to
+--     -tx-1 and not to -tx. Three tests nail it down: the corners of a tile land
+--     on the corners of the mirrored tile, every interior point of a tile lands
+--     inside the mirrored tile, and the 1024 tiles of a chunk land one per tile
+--     on the 1024 tiles of the mirrored chunk. A missing -1 slides a whole
+--     quadrant by one tile, and the `#to_emplace == #tiles` assert of
 --     `mirror_terrain.lua:147` would not notice -- it only counts them;
---   * the GROUP LAWS: four turns are the identity, `unrotate` undoes `rotate`,
---     turns compose and a turn count is read modulo 4 -- for positions, tiles,
---     chunks and the sixteen directions of Factorio 2.0 alike;
+--   * the GROUP LAWS: every transform is its own inverse, `unrotate` undoes
+--     `rotate`, the two mirrors compose to the half turn and a quadrant number
+--     is read modulo 4 -- for positions, tiles, chunks and the sixteen
+--     directions of Factorio 2.0 alike;
 --   * that quadrant numbers, the canonical chunk of an orbit and the team of a
---     quadrant all agree on one numbering: k = the team's quarter turns;
+--     quadrant all agree on one numbering: k = the team's quadrant;
 --   * the TWO-TEAM answers, which have to be today's: spawns {0,-44} and {0,44}
 --     (init.lua:141-150), the y-sign test of `of_position`, the tile reflection
 --     (tx, -ty-1) of `mirror_terrain.lua:141-156`, and no quadrants at all;
@@ -130,45 +131,40 @@ end
 -- The group laws
 -- ---------------------------------------------------------------------------
 
-function test_four_quarter_turns_are_the_identity()
-    for _, sample in ipairs(SAMPLES) do
-        local x, y = sample[1], sample[2]
+function test_every_transform_applied_twice_is_the_identity()
+    for k = 0, 3 do
+        for _, sample in ipairs(SAMPLES) do
+            local x, y = sample[1], sample[2]
+            local what = cell(x, y) .. ' k=' .. k
 
-        local px, py = x, y
-        local tx, ty = x, y
-        local cx, cy = x, y
-        for _ = 1, 4 do
-            px, py = Layout.rotate_position(1, px, py)
-            tx, ty = Layout.rotate_tile(1, tx, ty)
-            cx, cy = Layout.rotate_chunk(1, cx, cy)
+            assert_xy('position ' .. what, x, y, Layout.rotate_position(k, Layout.rotate_position(k, x, y)))
+            assert_xy('tile ' .. what, x, y, Layout.rotate_tile(k, Layout.rotate_tile(k, x, y)))
+            assert_xy('chunk ' .. what, x, y, Layout.rotate_chunk(k, Layout.rotate_chunk(k, x, y)))
         end
 
-        assert_xy('position ' .. cell(x, y), x, y, px, py)
-        assert_xy('tile ' .. cell(x, y), x, y, tx, ty)
-        assert_xy('chunk ' .. cell(x, y), x, y, cx, cy)
-    end
-
-    for d = 0, 15 do
-        local turned = d
-        for _ = 1, 4 do
-            turned = Layout.rotate_direction(1, turned)
+        for d = 0, 15 do
+            lunatest.assert_equal(
+                d,
+                Layout.rotate_direction(k, Layout.rotate_direction(k, d)),
+                'direction ' .. d .. ' k=' .. k
+            )
         end
-        lunatest.assert_equal(d, turned, 'direction ' .. d)
     end
 end
 
-function test_a_closed_form_turn_is_the_single_turn_applied_that_many_times()
-    for _, sample in ipairs(SAMPLES) do
-        local x, y = sample[1], sample[2]
-        local px, py = x, y
-        local tx, ty = x, y
-        for k = 1, 4 do
-            px, py = Layout.rotate_position(1, px, py)
-            tx, ty = Layout.rotate_tile(1, tx, ty)
-            local what = cell(x, y) .. ' turned ' .. k
-            assert_xy('position ' .. what, px, py, Layout.rotate_position(k, x, y))
-            assert_xy('tile ' .. what, tx, ty, Layout.rotate_tile(k, x, y))
-            assert_xy('chunk ' .. what, tx, ty, Layout.rotate_chunk(k, x, y))
+function test_the_inverse_is_the_transform_itself()
+    for k = 0, 3 do
+        for _, sample in ipairs(SAMPLES) do
+            local x, y = sample[1], sample[2]
+            local what = cell(x, y) .. ' k=' .. k
+            local px, py = Layout.rotate_position(k, x, y)
+            assert_xy('position ' .. what, px, py, Layout.unrotate_position(k, x, y))
+            local tx, ty = Layout.rotate_tile(k, x, y)
+            assert_xy('tile ' .. what, tx, ty, Layout.unrotate_tile(k, x, y))
+            assert_xy('chunk ' .. what, tx, ty, Layout.unrotate_chunk(k, x, y))
+        end
+        for d = 0, 15 do
+            lunatest.assert_equal(Layout.rotate_direction(k, d), Layout.unrotate_direction(k, d), 'direction ' .. d)
         end
     end
 end
@@ -220,31 +216,53 @@ function test_a_turn_count_is_read_modulo_four()
     end
 end
 
-function test_turns_compose()
+--- The group table: the two mirrors make the half turn, and a mirror after the
+--- half turn is the other mirror. `COMPOSE[a][b]` is the transform of "b, then a".
+local COMPOSE = {
+    [0] = { [0] = 0, 1, 2, 3 },
+    [1] = { [0] = 1, 0, 3, 2 },
+    [2] = { [0] = 2, 3, 0, 1 },
+    [3] = { [0] = 3, 2, 1, 0 },
+}
+
+function test_transforms_compose_as_the_two_mirrors_and_the_half_turn()
     for a = 0, 3 do
         for b = 0, 3 do
+            local ab = COMPOSE[a][b]
             for _, sample in ipairs(SAMPLES) do
                 local x, y = sample[1], sample[2]
-                local what = cell(x, y) .. ' turned ' .. a .. ' then ' .. b
+                local what = cell(x, y) .. ' by ' .. b .. ' then ' .. a
 
-                local px, py = Layout.rotate_position(a + b, x, y)
+                local px, py = Layout.rotate_position(ab, x, y)
                 assert_xy('position ' .. what, px, py, Layout.rotate_position(a, Layout.rotate_position(b, x, y)))
-                local tx, ty = Layout.rotate_tile(a + b, x, y)
+                local tx, ty = Layout.rotate_tile(ab, x, y)
                 assert_xy('tile ' .. what, tx, ty, Layout.rotate_tile(a, Layout.rotate_tile(b, x, y)))
+            end
+            for d = 0, 15 do
+                lunatest.assert_equal(
+                    Layout.rotate_direction(ab, d),
+                    Layout.rotate_direction(a, Layout.rotate_direction(b, d)),
+                    'direction ' .. d .. ' by ' .. b .. ' then ' .. a
+                )
             end
         end
     end
 end
 
 -- ---------------------------------------------------------------------------
--- The quarter turn is the clockwise one of Factorio's axes
+-- The transforms are the mirrors of Factorio's axes
 -- ---------------------------------------------------------------------------
 
-function test_one_turn_sends_north_to_east_and_the_canonical_quadrant_to_the_top_right()
-    -- Factorio's y grows to the SOUTH, so (0,-1) is north and R(x,y) = (-y,x).
-    assert_xy('north -> east', 1, 0, Layout.rotate_position(1, 0, -1))
-    assert_xy('north -> south', 0, 1, Layout.rotate_position(2, 0, -1))
-    assert_xy('north -> west', -1, 0, Layout.rotate_position(3, 0, -1))
+function test_the_top_right_and_bottom_left_are_mirrors_and_the_bottom_right_a_half_turn()
+    -- Factorio's y grows to the SOUTH, so (0,-1) is north.
+    assert_xy('top right mirrors x', 3, -5, Layout.rotate_position(1, -3, -5))
+    assert_xy('bottom right negates both', 3, 5, Layout.rotate_position(2, -3, -5))
+    assert_xy('bottom left mirrors y', -3, 5, Layout.rotate_position(3, -3, -5))
+
+    -- North stays north in the top row and becomes south in the bottom one.
+    assert_xy('north in the top right', 0, -1, Layout.rotate_position(1, 0, -1))
+    assert_xy('north in the bottom right', 0, 1, Layout.rotate_position(2, 0, -1))
+    assert_xy('north in the bottom left', 0, 1, Layout.rotate_position(3, 0, -1))
 
     assert_xy('canonical corner -> top right', 1, -1, Layout.rotate_position(1, -1, -1))
     lunatest.assert_equal(1, Layout.quadrant_of_position(Layout.rotate_position(1, -1, -1)))
@@ -252,17 +270,29 @@ function test_one_turn_sends_north_to_east_and_the_canonical_quadrant_to_the_top
     lunatest.assert_equal(3, Layout.quadrant_of_position(Layout.rotate_position(3, -1, -1)))
 end
 
-function test_a_direction_turns_by_four_of_the_sixteen_steps()
-    lunatest.assert_equal(4, Layout.rotate_direction(1, 0), 'north -> east')
-    lunatest.assert_equal(2, Layout.rotate_direction(1, 14), '14 -> 2')
-    lunatest.assert_equal(8, Layout.rotate_direction(2, 0), 'north -> south')
-    lunatest.assert_equal(0, Layout.rotate_direction(1, 12), 'west -> north')
-    lunatest.assert_equal(12, Layout.rotate_direction(3, 0), 'north -> west')
-    lunatest.assert_equal(0, Layout.rotate_direction(0, 0), 'no turn at all')
+function test_a_direction_is_mirrored_with_its_quadrant()
+    lunatest.assert_equal(0, Layout.rotate_direction(1, 0), 'north stays north in the top right')
+    lunatest.assert_equal(12, Layout.rotate_direction(1, 4), 'east -> west in the top right')
+    lunatest.assert_equal(14, Layout.rotate_direction(1, 2), 'northeast -> northwest in the top right')
+    lunatest.assert_equal(8, Layout.rotate_direction(2, 0), 'north -> south in the bottom right')
+    lunatest.assert_equal(12, Layout.rotate_direction(2, 4), 'east -> west in the bottom right')
+    lunatest.assert_equal(8, Layout.rotate_direction(3, 0), 'north -> south in the bottom left')
+    lunatest.assert_equal(4, Layout.rotate_direction(3, 4), 'east stays east in the bottom left')
+    lunatest.assert_equal(6, Layout.rotate_direction(3, 2), 'northeast -> southeast in the bottom left')
+    lunatest.assert_equal(0, Layout.rotate_direction(0, 0), 'no transform at all')
 
     for d = 0, 15 do
-        lunatest.assert_equal((d + 4) % 16, Layout.rotate_direction(1, d), 'direction ' .. d)
-        lunatest.assert_equal((d + 12) % 16, Layout.unrotate_direction(1, d), 'direction ' .. d .. ' back')
+        lunatest.assert_equal((16 - d) % 16, Layout.rotate_direction(1, d), 'direction ' .. d .. ' top right')
+        lunatest.assert_equal((d + 8) % 16, Layout.rotate_direction(2, d), 'direction ' .. d .. ' bottom right')
+        lunatest.assert_equal((24 - d) % 16, Layout.rotate_direction(3, d), 'direction ' .. d .. ' bottom left')
+    end
+end
+
+function test_the_bottom_left_direction_mirror_is_the_legacy_table()
+    -- `mirror_terrain.lua:6-15`, the two-team map's reflection through y = 0.
+    local legacy = { [0] = 8, [2] = 6, [4] = 4, [6] = 2, [8] = 0, [10] = 14, [12] = 12, [14] = 10 }
+    for d, mirrored in pairs(legacy) do
+        lunatest.assert_equal(mirrored, Layout.rotate_direction(3, d), 'direction ' .. d)
     end
 end
 
@@ -284,21 +314,18 @@ end
 -- The cell off-by-one
 -- ---------------------------------------------------------------------------
 
-function test_one_turn_of_a_tile_is_the_documented_formula()
-    -- The four tiles that touch the origin, one per quadrant, turn onto one
+function test_a_tile_mirror_is_the_documented_formula()
+    -- The four tiles that touch the origin, one per quadrant, mirror onto one
     -- another: each stays against the axes instead of stepping over them.
-    assert_xy('tile -1,-1 (canonical corner)', 0, -1, Layout.rotate_tile(1, -1, -1))
-    assert_xy('tile 0,-1', 0, 0, Layout.rotate_tile(1, 0, -1))
-    assert_xy('tile 0,0', -1, 0, Layout.rotate_tile(1, 0, 0))
-    assert_xy('tile -1,0', -1, -1, Layout.rotate_tile(1, -1, 0))
-    -- One step further out, on both sides of the vertical axis.
-    assert_xy('tile -1,1', -2, -1, Layout.rotate_tile(1, -1, 1))
-    assert_xy('tile -3,-1', 0, -3, Layout.rotate_tile(1, -3, -1))
-    -- Two turns are the point reflection of the lattice: both axes take the -1.
-    assert_xy('tile 0,0 twice', -1, -1, Layout.rotate_tile(2, 0, 0))
-    assert_xy('tile -1,-1 twice', 0, 0, Layout.rotate_tile(2, -1, -1))
-    -- Three turns: the -1 rides on the other axis.
-    assert_xy('tile -1,-1 three times', -1, 0, Layout.rotate_tile(3, -1, -1))
+    assert_xy('tile -1,-1 (canonical corner) top right', 0, -1, Layout.rotate_tile(1, -1, -1))
+    assert_xy('tile -1,-1 bottom right', 0, 0, Layout.rotate_tile(2, -1, -1))
+    assert_xy('tile -1,-1 bottom left', -1, 0, Layout.rotate_tile(3, -1, -1))
+    -- Further out: the -1 rides only on the axis that is negated.
+    assert_xy('tile -3,-7 top right', 2, -7, Layout.rotate_tile(1, -3, -7))
+    assert_xy('tile -3,-7 bottom right', 2, 6, Layout.rotate_tile(2, -3, -7))
+    assert_xy('tile -3,-7 bottom left', -3, 6, Layout.rotate_tile(3, -3, -7))
+    -- The bottom-left mirror is the legacy `(x, -y - 1)` of mirror_terrain.lua.
+    assert_xy('tile 7,-3 bottom left', 7, 2, Layout.rotate_tile(3, 7, -3))
 end
 
 function test_a_tiles_corners_rotate_onto_the_rotated_tiles_corners()
@@ -625,9 +652,9 @@ end
 
 function test_four_team_inward_vectors_point_at_the_front_river()
     round_of(4)
-    -- The pinwheel: every team faces a river arm, with its
-    -- own biters behind it -- the same picture four times, turned.
-    local expected = { { 0, 1 }, { -1, 0 }, { 0, -1 }, { 1, 0 } }
+    -- The mirrored map: the top row faces south across the horizontal river,
+    -- the bottom row faces north across it, each with its own biters behind it.
+    local expected = { { 0, 1 }, { 0, 1 }, { 0, -1 }, { 0, -1 } }
     for i, team in ipairs(Teams.all()) do
         assert_vector(team .. ' inward', expected[i][1], expected[i][2], Layout.inward(team))
         assert_vector(team .. ' outward', -expected[i][1], -expected[i][2], Layout.outward(team))
@@ -726,7 +753,7 @@ function test_the_closed_quadrant_still_has_a_geometry()
     lunatest.assert_equal(3, Teams.k_of(absent))
 
     assert_vector('its quadrant still has a spawn', -44, 44, Layout.spawn_position(absent))
-    assert_xy('and a tile transform', -4, 6, Layout.tile_from_canonical(absent, -7, -4))
+    assert_xy('and a tile transform', -7, 3, Layout.tile_from_canonical(absent, -7, -4))
     lunatest.assert_equal(
         3,
         Layout.quadrant_of_chunk(Layout.chunk_from_canonical(absent, -2, -3)),

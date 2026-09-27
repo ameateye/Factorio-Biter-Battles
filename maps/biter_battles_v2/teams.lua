@@ -30,7 +30,7 @@ local Public = {}
 
 ---@class TeamEntry
 ---@field name string The force name of the team.
----@field k integer Clockwise quarter turns from the canonical zone to this team's zone (cross layout).
+---@field k integer The quadrant of this team's zone, and the transform onto it (cross layout; layout.lua).
 ---@field color { r: integer, g: integer, b: integer } Components in 0..255.
 ---@field text_color string The same colour as the payload of a `[color=...]` rich-text tag.
 ---@field cross_name string Display name in the four-square layout, when `Config.cross_team_names` has none.
@@ -372,7 +372,8 @@ function Public.ring_index(name)
     return RING_INDEX[name]
 end
 
----Clockwise quarter turns from the canonical zone to this team's zone, 0..3.
+---The quadrant of this team's zone, 0..3, clockwise from the top left; also the
+---transform from the canonical zone to it (`layout.lua`).
 ---@param name any
 ---@return integer|nil
 function Public.k_of(name)
