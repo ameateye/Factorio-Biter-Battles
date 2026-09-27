@@ -4,7 +4,7 @@ local functions = require('maps.biter_battles_v2.functions')
 local tables = require('maps.biter_battles_v2.tables')
 local event = require('utils.event')
 local difficulty_vote = require('maps.biter_battles_v2.difficulty_vote')
-local Force = require('utils.force')
+local Teams = require('maps.biter_battles_v2.teams')
 
 ---@class ForceStats
 ---@field final_evo? number
@@ -119,12 +119,45 @@ local fluid_inventories = {
     ['storage-tank'] = true,
 }
 
-local health_factor_map = {
-    north_biters = 1,
-    north_biters_boss = 20,
-    south_biters = 1,
-    south_biters_boss = 20,
-}
+---What a boss biter's max health counts for when its loss is credited to the
+---team that owns it. The value the four-name table this replaces spelled out;
+---it is deliberately not `Config.health_multiplier_boss`, which is a different
+---number.
+local BOSS_HEALTH_FACTOR = 20
+
+---The multiplier a dead biter's max health is scaled by: 1 for a team's regular
+---biter force, `BOSS_HEALTH_FACTOR` for its boss force, nil for anything else.
+---With two teams that is the same answer, for the same four force names, as the
+---table this replaces.
+---@param team string The owning team, as `Teams.team_of_biter_force` gives it.
+---@param force_name string
+---@return number|nil
+local function health_factor_of(team, force_name)
+    if force_name == Teams.biter_force(team) then
+        return 1
+    end
+    if force_name == Teams.boss_force(team) then
+        return BOSS_HEALTH_FACTOR
+    end
+    return nil
+end
+
+---`storage.team_stats.forces[team]`, created on first use with exactly the
+---record `Init.tables()` seeds (`{ items, food, damage_types }`, in that order,
+---so the JSON of the external log keeps its key order). Every dereference in
+---this file goes through here: the allocation has one key per team of the
+---round, and a force that is not in it used to crash the handler.
+---@param team string
+---@return ForceStats
+local function force_stats_of(team)
+    local forces = storage.team_stats.forces
+    local force_stats = forces[team]
+    if not force_stats then
+        force_stats = { items = {}, food = {}, damage_types = {} }
+        forces[team] = force_stats
+    end
+    return force_stats
+end
 
 ---Check if object is tracked by team stats.
 ---@param name string Name of an object.
@@ -153,14 +186,17 @@ local function update_teamstats()
     end
     local prev_ticks = team_stats.ticks or 0
     team_stats.ticks = tick
-    local total_players = { north = 0, south = 0 }
+    local total_players = {}
+    for _, team in ipairs(Teams.all()) do
+        total_players[team] = 0
+    end
     for _, force_name in pairs(storage.chosen_team) do
         total_players[force_name] = (total_players[force_name] or 0) + 1
     end
-    for _, force_name in ipairs({ 'north', 'south' }) do
+    for _, force_name in ipairs(Teams.all()) do
         local force = game.forces[force_name]
-        local biter_force_name = force_name .. '_biters'
-        local force_stats = team_stats.forces[force_name]
+        local biter_force_name = Teams.biter_force(force_name)
+        local force_stats = force_stats_of(force_name)
         local threat = storage.bb_threat[biter_force_name]
         force_stats.final_evo = storage.bb_evolution[biter_force_name]
         force_stats.peak_threat = (force_stats.peak_threat and math.max(threat, force_stats.peak_threat) or threat)
@@ -261,10 +297,10 @@ function TeamStatsCollect.compute_stats()
 
     -- In the (very uncommon) case of team_stats_use_fake_data being set, we will generate fake data for
     -- testing the UI.
-    local teams = { 'north', 'south' }
+    local teams = Teams.all()
     ---@type TeamStats
     local stats = { ticks = 110 * 3600, won_by_team = teams[math.random(1, 3)], forces = {} }
-    for idx, force_name in ipairs({ 'north', 'south' }) do
+    for idx, force_name in ipairs(teams) do
         ---@type ForceStats
         local force_stats = {
             final_evo = idx * 0.55,
@@ -349,10 +385,11 @@ end
 ---@param entity LuaEntity
 ---@param force string
 local function on_gone_entity(entity, force)
-    local item_stats = storage.team_stats.forces[force].items
+    local force_stats = force_stats_of(force)
+    local item_stats = force_stats.items
     if not item_stats then
         item_stats = {}
-        storage.team_stats.forces[force].items = item_stats
+        force_stats.items = item_stats
     end
 
     local fluids = {}
@@ -431,12 +468,13 @@ local function on_entity_died(event)
     end
     local entity_force_name = (entity.force and entity.force.name) or ''
 
-    -- North/South entities
-    if entity_force_name == 'north' or entity_force_name == 'south' then
-        local item_stats = storage.team_stats.forces[entity_force_name].items
+    -- Entities of a team of the round
+    if Teams.is_active(entity_force_name) then
+        local force_stats = force_stats_of(entity_force_name)
+        local item_stats = force_stats.items
         if not item_stats then
             item_stats = {}
-            storage.team_stats.forces[entity_force_name].items = item_stats
+            force_stats.items = item_stats
         end
         if entity.type == 'construction-robot' or entity.type == 'logistic-robot' then
             item_stats[entity.name] = item_stats[entity.name] or {}
@@ -456,19 +494,24 @@ local function on_entity_died(event)
         return
     end
 
-    -- North/South biters
+    -- Biters of a team of the round
     if not event.damage_type then
         return
     end
-    local health_factor = health_factor_map[entity_force_name]
-    local force_name = Force.get_player_force_name(entity_force_name)
-    if not health_factor or not force_name then
+    local force_name = Teams.team_of_biter_force(entity_force_name)
+    if not force_name or not Teams.is_active(force_name) then
+        return
+    end
+    local health_factor = health_factor_of(force_name, entity_force_name)
+    if not health_factor then
         return
     end
 
-    health_factor = health_factor * storage.biter_health_factor[game.forces[force_name .. '_biters'].index]
+    -- Boss kills are scaled by the REGULAR biter force's health factor: a
+    -- pre-existing quirk of this line, kept as it is.
+    health_factor = health_factor * storage.biter_health_factor[game.forces[Teams.biter_force(force_name)].index]
 
-    local force_stats = storage.team_stats.forces[force_name]
+    local force_stats = force_stats_of(force_name)
     local damage_stats = force_stats.damage_types[event.damage_type.name]
     if not damage_stats then
         damage_stats = { kills = 0, damage = 0 }
@@ -493,7 +536,7 @@ local function on_mined_entity(event)
     end
 
     local force = entity.force.name
-    if force ~= 'north' and force ~= 'south' then
+    if not Teams.is_active(force) then
         return
     end
 
@@ -521,14 +564,15 @@ local function on_player_flushed_fluid(event)
     end
 
     local entity_force_name = (entity.force and entity.force.name) or ''
-    if entity_force_name ~= 'north' and entity_force_name ~= 'south' then
+    if not Teams.is_active(entity_force_name) then
         return
     end
 
-    local item_stats = storage.team_stats.forces[entity_force_name].items
+    local force_stats = force_stats_of(entity_force_name)
+    local item_stats = force_stats.items
     if not item_stats then
         item_stats = {}
-        storage.team_stats.forces[entity_force_name].items = item_stats
+        force_stats.items = item_stats
     end
 
     local name = event.fluid

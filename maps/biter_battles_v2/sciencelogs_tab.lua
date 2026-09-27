@@ -3,6 +3,8 @@
 local Tabs = require('comfy_panel.main')
 local tables = require('maps.biter_battles_v2.tables')
 local Functions = require('maps.biter_battles_v2.functions')
+local Model = require('maps.biter_battles_v2.sciencelogs_model')
+local Teams = require('maps.biter_battles_v2.teams')
 local event = require('utils.event')
 local bb_config = require('maps.biter_battles_v2.config')
 local food_values = tables.food_values
@@ -31,6 +33,94 @@ local function get_science_text(food_name, food_short_name)
     })
 end
 
+---Today's summary block, and the only one a two-team round ever draws: one
+---table per team of the round, the heading naming the force and seven cells of
+---running totals beside it, a line under each. Every element, name, caption and
+---width here is what it has always been -- the loop, which at
+---two teams hands out north and then south and builds exactly the two rows the
+---tab has always had, the south row's missing underscore included.
+---@param science_scrollpanel LuaGuiElement
+---@param teams string[]
+---@param column_widths integer[]
+---@param width_summary_first_column integer
+---@param width_summary_columns integer
+local function draw_legacy_summary_rows(
+    science_scrollpanel,
+    teams,
+    column_widths,
+    width_summary_first_column,
+    width_summary_columns
+)
+    for team_index, team in ipairs(teams) do
+        local totals = storage['science_logs_total_' .. team] or {}
+        local summary_panel_table = science_scrollpanel.add({ type = 'table', column_count = #column_widths })
+        local label = summary_panel_table.add({
+            type = 'label',
+            name = 'science_logs_total_' .. team .. '_header',
+            caption = 'Total sent by ' .. team,
+        })
+        label.style.minimal_width = width_summary_first_column
+        label.style.maximal_width = width_summary_first_column
+        -- The south row has never put an underscore between the team and the
+        -- column index in its element names, unlike the north row above it
+        -- (INVENTORY defect). Keeping today's names to the byte means keeping
+        -- that: the first row separates, the rows below it do not.
+        local cell_prefix = 'science_logs_total_' .. team .. (team_index == 1 and '_' or '')
+        for i = 1, #food_long_and_short do
+            local label = summary_panel_table.add({
+                type = 'label',
+                name = cell_prefix .. i,
+                caption = totals[i],
+            })
+            label.style.minimal_width = width_summary_columns
+            label.style.maximal_width = width_summary_columns
+        end
+        science_scrollpanel.add({ type = 'line' })
+    end
+end
+
+---The same block above two teams, from `Model.columns()`: the same tables, the
+---same element names and the same seven cells, with the heading the round's
+---display name in the team's colour -- greyed for a team that is out, which
+---keeps its row -- because a compass name is not what the four-square map calls
+---that team anywhere else. The heading wraps inside today's 110 px rather than
+---widening the block, so the summary keeps its width and the panel keeps its
+---scrollbars.
+---@param science_scrollpanel LuaGuiElement
+---@param column_widths integer[]
+---@param width_summary_first_column integer
+---@param width_summary_columns integer
+local function draw_team_summary_rows(
+    science_scrollpanel,
+    column_widths,
+    width_summary_first_column,
+    width_summary_columns
+)
+    for _, column in ipairs(Model.columns()) do
+        local totals = storage[column.key] or {}
+        local summary_panel_table = science_scrollpanel.add({ type = 'table', column_count = #column_widths })
+        local label = summary_panel_table.add({
+            type = 'label',
+            name = column.header_name,
+            caption = column.caption,
+        })
+        label.style.minimal_width = width_summary_first_column
+        label.style.maximal_width = width_summary_first_column
+        label.style.single_line = false
+        label.style.font_color = column.color
+        for i = 1, #food_long_and_short do
+            local label = summary_panel_table.add({
+                type = 'label',
+                name = column.cell_prefix .. i,
+                caption = totals[i],
+            })
+            label.style.minimal_width = width_summary_columns
+            label.style.maximal_width = width_summary_columns
+        end
+        science_scrollpanel.add({ type = 'line' })
+    end
+end
+
 ---@param player LuaPlayer
 ---@param element LuaGuiElement
 local function add_science_logs(player, element)
@@ -52,12 +142,21 @@ local function add_science_logs(player, element)
             )
         end
     end
-    if storage.science_logs_total_north == nil then
-        storage.science_logs_total_north = { 0 }
-        storage.science_logs_total_south = { 0 }
-        for _ = 1, #food_long_and_short do
-            table.insert(storage.science_logs_total_north, 0)
-            table.insert(storage.science_logs_total_south, 0)
+    -- One array per active team under today's key name. The gate is still the
+    -- first team's array, and the arrays are still one entry longer than
+    -- `feeding.lua` makes them (INVENTORY defect, generalised, not fixed).
+    local teams = Teams.all()
+    -- Today's tab is the two-team tab: every multi-team branch keeps it
+    -- verbatim, and this is the only thing that turns the others on. Read once,
+    -- so the summary block and the force filter cannot disagree about it.
+    local two_teams = Teams.count() == 2
+    if storage['science_logs_total_' .. teams[1]] == nil then
+        for _, team in ipairs(teams) do
+            local key = 'science_logs_total_' .. team
+            storage[key] = { 0 }
+            for _ = 1, #food_long_and_short do
+                table.insert(storage[key], 0)
+            end
         end
     end
 
@@ -80,43 +179,17 @@ local function add_science_logs(player, element)
         label.style.maximal_width = w
     end
 
-    local summary_panel_table = science_scrollpanel.add({ type = 'table', column_count = #column_widths })
-    local label = summary_panel_table.add({
-        type = 'label',
-        name = 'science_logs_total_north_header',
-        caption = 'Total sent by north',
-    })
-    label.style.minimal_width = width_summary_first_column
-    label.style.maximal_width = width_summary_first_column
-    for i = 1, #food_long_and_short do
-        local label = summary_panel_table.add({
-            type = 'label',
-            name = 'science_logs_total_north_' .. i,
-            caption = storage.science_logs_total_north[i],
-        })
-        label.style.minimal_width = width_summary_columns
-        label.style.maximal_width = width_summary_columns
+    if two_teams then
+        draw_legacy_summary_rows(
+            science_scrollpanel,
+            teams,
+            column_widths,
+            width_summary_first_column,
+            width_summary_columns
+        )
+    else
+        draw_team_summary_rows(science_scrollpanel, column_widths, width_summary_first_column, width_summary_columns)
     end
-    science_scrollpanel.add({ type = 'line' })
-
-    local summary_panel_table2 = science_scrollpanel.add({ type = 'table', column_count = #column_widths })
-    local label = summary_panel_table2.add({
-        type = 'label',
-        name = 'science_logs_total_south_header',
-        caption = 'Total sent by south',
-    })
-    label.style.minimal_width = width_summary_first_column
-    label.style.maximal_width = width_summary_first_column
-    for i = 1, #food_long_and_short do
-        local label = summary_panel_table2.add({
-            type = 'label',
-            name = 'science_logs_total_south' .. i,
-            caption = storage.science_logs_total_south[i],
-        })
-        label.style.minimal_width = width_summary_columns
-        label.style.maximal_width = width_summary_columns
-    end
-    science_scrollpanel.add({ type = 'line' })
 
     local summary_panel_table3 = science_scrollpanel.add({ type = 'table', column_count = #column_widths })
     local label = summary_panel_table3.add({
@@ -159,11 +232,24 @@ local function add_science_logs(player, element)
 
     local t_filter = science_scrollpanel.add({ type = 'table', name = 'science_logs_filter_table', column_count = 3 })
 
+    -- The registry's 'all teams' entry kept first -- index 1 means "no filter"
+    -- at the bottom of this function -- then one entry per active team, which
+    -- for two teams is `Tables.forces_list` itself
+    -- (tests/test-sciencelogs-multiteam.lua pins that against the registry).
+    local force_filter_items = Model.force_filter_items(forces_list[1])
+    -- A choice survives a map reset, so a round with fewer teams can inherit an
+    -- index that no longer exists; that would be a hard error on `add`.
+    local force_choice = storage.dropdown_users_choice_force[player.name]
+    if force_choice > #force_filter_items then
+        force_choice = 1
+        storage.dropdown_users_choice_force[player.name] = force_choice
+    end
+
     local dropdown_force = t_filter.add({
         name = 'dropdown-force',
         type = 'drop-down',
-        items = forces_list,
-        selected_index = storage.dropdown_users_choice_force[player.name],
+        items = force_filter_items,
+        selected_index = force_choice,
     })
     local dropdown_science = t_filter.add({
         name = 'dropdown-science',
@@ -197,16 +283,27 @@ local function add_science_logs(player, element)
         end
     end
 
+    -- The team the force filter is set to above two teams, nil when it is on
+    -- 'all teams'. The entry is a display name there, which is neither a Lua
+    -- pattern nor necessarily unique, so the row is matched against the team
+    -- the entry stands for instead of against its text; two teams keep today's
+    -- entries and today's text match, below, to the byte.
+    local force_filter = Model.filtered_team(dropdown_force.selected_index)
+
     if storage.science_logs_text then
         for i = 1, #storage.science_logs_date, 1 do
             local real_force_name = storage.science_logs_fed_team[i]
             local custom_force_name = Functions.team_name_with_color(real_force_name)
             local easy_food_name = food_long_to_short[storage.science_logs_food_name[i]].short_name
 
-            if
-                dropdown_force.selected_index == 1
-                or real_force_name:match(dropdown_force.get_item(dropdown_force.selected_index))
-            then
+            local force_match
+            if two_teams then
+                force_match = dropdown_force.selected_index == 1
+                    or real_force_name:match(dropdown_force.get_item(dropdown_force.selected_index))
+            else
+                force_match = force_filter == nil or real_force_name == force_filter
+            end
+            if force_match then
                 if
                     dropdown_science.selected_index == 1
                     or (dropdown_science.selected_index == 2 and (easy_food_name:match('space') or easy_food_name:match(

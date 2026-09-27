@@ -2,6 +2,8 @@ local BbTables = require('maps.biter_battles_v2.tables')
 local ClosableFrame = require('utils.ui.closable_frame')
 local Color = require('utils.color_presets')
 local FeedingCalculations = require('maps.biter_battles_v2.feeding_calculations')
+local Layout = require('maps.biter_battles_v2.layout')
+local Teams = require('maps.biter_battles_v2.teams')
 local Event = require('utils.event')
 
 local table_concat = table.concat
@@ -94,23 +96,34 @@ local function threat_color(threat)
     return string.format('%.2f,%.2f,%.2f', c[1], c[2], c[3])
 end
 
----@param sending_force 'north'|'south'
----@return 'north'|'south'
+---Who a send from `sending_force` lands on. With two teams this is today's
+---lookup, verbatim; above two it is the first of `Teams.feed_targets` -- the
+---split's first share -- and, when a send has nowhere to go, the first enemy.
+---@param sending_force string
+---@return string|nil
 local function receiving_force(sending_force)
-    return storage.training_mode and sending_force or BbTables.enemy_team_of[sending_force]
+    if Teams.count() == 2 then
+        return storage.training_mode and sending_force or BbTables.enemy_team_of[sending_force]
+    end
+    local targets = Teams.feed_targets(sending_force)
+    if targets[1] then
+        return targets[1].team
+    end
+    local enemies = Teams.enemies_of(sending_force)
+    return enemies[1] or sending_force
 end
 
---- Guesses food receiving force judging by designated team and game settings. Defaults to 'north'
+--- Guesses food receiving force judging by designated team and game settings. Defaults to the first team
 ---@param player LuaPlayer
----@return 'north'|'south' force
+---@return string force
 local function guess_receiving_force(player)
     local pf = player.force.name
     if pf == 'spectator' then
         pf = storage.chosen_team[player.name]
     end
     -- spectator or maybe in the editor with a weird force set
-    if pf ~= 'north' and pf ~= 'south' then
-        return 'north'
+    if not Teams.is_active(pf) then
+        return Teams.all()[1]
     end
     return receiving_force(pf)
 end
@@ -121,12 +134,15 @@ end
 ---@field threat number
 ---@field threat_increase number
 
----@param force 'north'|'south'
+---@param force string
 ---@param food_value number
 ---@return FeedEffects
 local function current_feed_effects(force, food_value)
-    local player_count = #game.forces.north.connected_players + #game.forces.south.connected_players
-    local biter_force = force .. '_biters'
+    local player_count = 0
+    for _, team in ipairs(Teams.all()) do
+        player_count = player_count + #game.forces[team].connected_players
+    end
+    local biter_force = Teams.biter_force(force)
     local evo, threat = storage.bb_evolution[biter_force], storage.bb_threat[biter_force]
     local effects = FeedingCalculations.calc_feed_effects(
         evo,
@@ -144,7 +160,7 @@ local function current_feed_effects(force, food_value)
 end
 
 ---@param output_table LuaGuiElement
----@param recv_force 'north'|'south'
+---@param recv_force string
 ---@param foods { [string]: number }
 local function update_output_table(output_table, recv_force, foods)
     output_table.clear()
@@ -212,16 +228,29 @@ local function update_output_table(output_table, recv_force, foods)
     end
 end
 
+---The receiving team the selector currently shows. Two teams keep the
+---two-state switch of today, read exactly as today; above two teams the
+---selector is a drop-down over `Teams.all()`, so the element's own type decides
+---how to read it -- a window opened before a reset is read the way it was
+---built.
 ---@param team_selector LuaGuiElement
----@return 'north'|'south'
+---@return string
 local function get_selected_team(team_selector)
-    return team_selector.switch_state == 'left' and 'north' or 'south'
+    local teams = Teams.all()
+    if team_selector.type == 'switch' then
+        return team_selector.switch_state == 'left' and teams[1] or teams[2]
+    end
+    return teams[team_selector.selected_index] or teams[1]
 end
 
 ---@param team_selector LuaGuiElement
----@param selected_team 'north'|'south'
+---@param selected_team string
 local function update_team_selector(team_selector, selected_team)
-    team_selector.switch_state = selected_team == 'north' and 'left' or 'right'
+    if team_selector.type == 'switch' then
+        team_selector.switch_state = selected_team == Teams.all()[1] and 'left' or 'right'
+        return
+    end
+    team_selector.selected_index = Teams.index_of(selected_team) or 1
 end
 
 ---@param food_table LuaGuiElement
@@ -283,13 +312,31 @@ function Public.toggle_calc_send_ui(player)
     input_frame_layout.style.horizontally_stretchable = true
 
     -- TODO move color coding to functions.lua?
-    local team_selector = input_frame_layout.add({
-        type = 'switch',
-        name = 'team_selector',
-        left_label_caption = '[color=120,120,255]North[/color]',
-        right_label_caption = '[color=255,65,65]South[/color]',
-        tooltip = 'Receiving side',
-    })
+    -- Two teams keep the two-state switch, captions and colours as they are;
+    -- a switch has no third state, so above two teams the same element name
+    -- carries a drop-down over the active teams instead.
+    local team_selector
+    if Teams.count() == 2 then
+        team_selector = input_frame_layout.add({
+            type = 'switch',
+            name = 'team_selector',
+            left_label_caption = '[color=120,120,255]North[/color]',
+            right_label_caption = '[color=255,65,65]South[/color]',
+            tooltip = 'Receiving side',
+        })
+    else
+        local team_names = {}
+        for _, team in ipairs(Teams.all()) do
+            team_names[#team_names + 1] = Teams.display_name(team)
+        end
+        team_selector = input_frame_layout.add({
+            type = 'drop-down',
+            name = 'team_selector',
+            items = team_names,
+            selected_index = 1,
+            tooltip = 'Receiving side',
+        })
+    end
 
     input_frame_layout.add({ type = 'line', style = 'inside_shallow_frame_with_padding_line' })
 
@@ -355,7 +402,7 @@ end
 
 ---@class CalcSendElements
 ---@field output_table LuaGuiElement evo/threat goes here
----@field team_selector LuaGuiElement north/south switch
+---@field team_selector LuaGuiElement receiving-team switch (two teams) or drop-down
 ---@field food_table LuaGuiElement table with food count input fields
 
 ---@param calc_send_frame LuaGuiElement
@@ -554,8 +601,19 @@ local function on_fill_from_remote_view_clicked(button)
 
     -- notice that we don't care about the type of controller
     local sending_force = player.force.name
-    if sending_force ~= 'north' and sending_force ~= 'south' then
-        sending_force = player.position.y >= 0 and 'south' or 'north'
+    if not Teams.is_active(sending_force) then
+        if Teams.count() == 2 then
+            -- Geometry: one river at y = 0, the first team above it. The
+            -- expression is today's, with the two names read
+            -- from the registry in the same order.
+            local teams = Teams.all()
+            sending_force = player.position.y >= 0 and teams[2] or teams[1]
+        else
+            -- The four-square map: the quadrant the viewer is in owns the send.
+            -- Nobody owns the closed quadrant of a three-team round, so fall
+            -- back to the first active team there.
+            sending_force = Layout.of_position(player.position) or Teams.all()[1]
+        end
     end
 
     local search_bbox = viewport_area(player)

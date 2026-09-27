@@ -3,16 +3,20 @@
 local Ai = require('maps.biter_battles_v2.ai')
 local AiStrikes = require('maps.biter_battles_v2.ai_strikes')
 local AiTargets = require('maps.biter_battles_v2.ai_targets')
+local AttackClock = require('maps.biter_battles_v2.attack_clock')
 local MultiSilo = require('comfy_panel.special_games.multi_silo')
 local bb_config = require('maps.biter_battles_v2.config')
 local Functions = require('maps.biter_battles_v2.functions')
 local Game_over = require('maps.biter_battles_v2.game_over')
 local Gui = require('maps.biter_battles_v2.gui')
 local Init = require('maps.biter_battles_v2.init')
+local Layout = require('maps.biter_battles_v2.layout')
 local MatchFormat = require('maps.biter_battles_v2.match_format')
 local Mirror_terrain = require('maps.biter_battles_v2.mirror_terrain')
+local Rotate_terrain = require('maps.biter_battles_v2.rotate_terrain')
 local Muted = require('utils.muted')
 local Team_manager = require('maps.biter_battles_v2.team_manager')
+local Teams = require('maps.biter_battles_v2.teams')
 local Shortcuts = require('maps.biter_battles_v2.shortcuts')
 local Terrain = require('maps.biter_battles_v2.terrain')
 local FeederChest = require('maps.biter_battles_v2.feeder_chest')
@@ -23,6 +27,8 @@ local Task = require('utils.task')
 local String = require('utils.string')
 local Token = require('utils.token')
 local Color = require('utils.color_presets')
+local CaptainVote = require('maps.biter_battles_v2.captain_vote')
+local CountVote = require('maps.biter_battles_v2.count_vote')
 local ResearchInfo = require('maps.biter_battles_v2.research_info')
 local DifficultyVote = require('maps.biter_battles_v2.difficulty_vote')
 local ComfyMain = require('comfy_panel.main')
@@ -86,6 +92,20 @@ local function on_player_joined_game(event)
     end
 
     Gui.burners_balance(player)  -- tt_mode handoff lives inside this fn (see gui.lua)
+
+    -- Above two teams a team can die while its players are offline: they come
+    -- back standing in a base that lost the round, so they are moved to the
+    -- spectators here, like the team mates who were connected at the time. With
+    -- two teams nobody is ever marked and this returns at its first test.
+    Game_over.spectate_if_eliminated(player)
+
+    -- The team-count vote window, when one is open: a player joining mid-vote
+    -- gets it and can vote. No vote open -- the case of every two-team server
+    -- that never calls for one -- and this adds nothing to the GUI tree.
+    CountVote.on_player_joined_game(player)
+
+    -- The captain vote window (BB Captains), same contract: nothing without a vote open.
+    CaptainVote.on_player_joined_game(player)
 end
 
 local function on_gui_click(event)
@@ -101,6 +121,16 @@ local function on_gui_click(event)
     if Functions.map_intro_click(player, element) then
         return
     end
+    -- The team-count vote window. Its elements are the only ones
+    -- named `bb_count_vote...`, so with no vote open this is one string compare.
+    if CountVote.on_gui_click(player, element) then
+        return
+    end
+    -- The captain vote window: elements named `bb_captain_vote...` only.
+    if CaptainVote.on_gui_click(player, element) then
+        return
+    end
+
     Team_manager.gui_click(event)
 end
 
@@ -290,7 +320,7 @@ local function on_console_chat(event)
     possibly_do_pings(msg, player_name, function(ping_player)
         return player_force_name == ping_player.force.name
     end)
-    if not muted and (player_force_name == 'north' or player_force_name == 'south') then
+    if not muted and Teams.is_active(player_force_name) then
         -- Do not share team's chat with spectators during CPT preparation phase
         local special = storage.special_games_variables.captain_mode
         if special and special.prepaPhase then
@@ -315,8 +345,10 @@ local function on_console_chat(event)
     local sane_message = String.sanitize_gps_tags(event.message)
     local gps = String.has_sanitized_gps_tag(sane_message)
     if not gps and not muted and player_force_name == 'spectator' then
-        Functions.print_message_to_players(game.forces.north.connected_players, player_name, msg, nil, do_ping)
-        Functions.print_message_to_players(game.forces.south.connected_players, player_name, msg, nil, do_ping)
+        -- Same recipients in the same order as the two unrolled calls: north, then south.
+        for _, team in ipairs(Teams.all()) do
+            Functions.print_message_to_players(game.forces[team].connected_players, player_name, msg, nil, do_ping)
+        end
     end
 
     -- Don't pass messages to discord with just a gps tag to avoid spam.
@@ -482,7 +514,7 @@ end
 
 local function autotagging_outposters()
     for _, p in pairs(game.connected_players) do
-        if p.force.name == 'north' or p.force.name == 'south' then
+        if Teams.is_active(p.force.name) then
             if math.abs(p.physical_position.x) < autoTagDistance then
                 if hasOutpostTag(p.tag) then
                     p.tag = p.tag:gsub('%' .. autoTagWestOutpost, '')
@@ -521,11 +553,12 @@ local function afk_kick(player)
 end
 
 local function anti_afk_system()
-    for _, player in pairs(game.forces.north.connected_players) do
-        afk_kick(player)
-    end
-    for _, player in pairs(game.forces.south.connected_players) do
-        afk_kick(player)
+    -- Team by team in Teams.all() order -- north then south -- so the sweep
+    -- visits the same players in the same order as the two unrolled loops did.
+    for _, team in ipairs(Teams.all()) do
+        for _, player in pairs(game.forces[team].connected_players) do
+            afk_kick(player)
+        end
     end
 end
 
@@ -548,7 +581,8 @@ local tick_minute_functions = {
 -- The keys above that make up one main attack cycle: setup, the seven waves,
 -- teardown. MatchFormat can widen the interval between cycles past the vanilla
 -- minute; the rest of the table (evo raise, silo pokes, autotagging, afk sweep)
--- keeps its own cadence.
+-- keeps its own cadence. Above two teams these nine are the keys the attack
+-- clock owns and the table no longer dispatches (see on_tick).
 local attack_cycle_keys = {}
 for wave = 0, 8 do
     attack_cycle_keys[300 * 3 + 30 * wave] = true
@@ -574,12 +608,20 @@ end
 local function on_tick()
     local tick = game.tick
 
+    -- The team-count vote's countdown. It returns on its first
+    -- test unless a vote is open, so it costs one table lookup per tick and
+    -- writes nothing on a server that never votes.
+    CountVote.on_tick(tick)
+    -- The captain vote's countdown: one table lookup per tick with no vote open.
+    CaptainVote.on_tick(tick)
+
     if tick % 60 == 0 then
         profile(on_tick_profilers, 'threat', function()
-            storage.bb_threat['north_biters'] = storage.bb_threat['north_biters']
-                + storage.bb_threat_income['north_biters']
-            storage.bb_threat['south_biters'] = storage.bb_threat['south_biters']
-                + storage.bb_threat_income['south_biters']
+            -- One add per active biter force, in Teams order (north_biters then
+            -- south_biters) -- exactly the two unrolled statements this replaces.
+            for _, bf in ipairs(Teams.biter_forces()) do
+                storage.bb_threat[bf] = storage.bb_threat[bf] + storage.bb_threat_income[bf]
+            end
         end)
     end
 
@@ -603,11 +645,37 @@ local function on_tick()
 
     if tick % 30 == 0 then
         local key = tick % 3600
-        local skip = attack_cycle_keys[key] and MatchFormat.skip_attack_cycle(tick)
-        if tick_minute_functions[key] and not skip then
-            profile(on_tick_profilers, key, function()
-                tick_minute_functions[key]()
-            end)
+        -- Above two teams, unless the shared-cycle fallback is selected, the
+        -- nine keys of the attack cycle belong to the attack-turn clock: it
+        -- starts a cycle every `2 * interval / N` ticks so that every team is
+        -- still attacked every two intervals (attack_clock.lua). The clock hands
+        -- back the key of the step, 900..1140, so the function it runs and the
+        -- profiler entry it runs under are the ones this table would have
+        -- produced at that step of a vanilla minute. The other slots of the
+        -- table keep their per-minute cadence, and are run first so that the
+        -- minute's own schedule is never displaced by the clock's extra cycle;
+        -- with the intervals a league format can set the two never fall on the
+        -- same tick anyway. skip_attack_cycle has no part here -- the period
+        -- already carries the interval.
+        if AttackClock.is_on(Teams.count()) then
+            if tick_minute_functions[key] and not attack_cycle_keys[key] then
+                profile(on_tick_profilers, key, function()
+                    tick_minute_functions[key]()
+                end)
+            end
+            local step_key = AttackClock.step_key(tick, MatchFormat.attack_interval_ticks(), Teams.count())
+            if step_key then
+                profile(on_tick_profilers, step_key, function()
+                    tick_minute_functions[step_key]()
+                end)
+            end
+        else
+            local skip = attack_cycle_keys[key] and MatchFormat.skip_attack_cycle(tick)
+            if tick_minute_functions[key] and not skip then
+                profile(on_tick_profilers, key, function()
+                    tick_minute_functions[key]()
+                end)
+            end
         end
     end
 
@@ -654,11 +722,10 @@ local function on_marked_for_deconstruction(event)
         event.entity.cancel_deconstruction(force_name)
         return
     end
-    local half_river_width = bb_config.border_river_width / 2
-    if
-        (force_name == 'north' and event.entity.position.y > half_river_width)
-        or (force_name == 'south' and event.entity.position.y < -half_river_width)
-    then
+    -- Terrain.deconstruction_denied keeps this rule, which is NOT the robot
+    -- build rule: with two teams it is today's half-a-river-width test on the
+    -- ENEMY side, on the four-square map it is "your own quadrant only".
+    if Terrain.deconstruction_denied(force_name, event.entity.position) then
         event.entity.cancel_deconstruction(force_name)
     end
 end
@@ -690,6 +757,105 @@ local function on_player_dropped_item_into_entity(event)
     stack.clear()
 end
 
+-- The four-square map of three and four teams: one quadrant is generated by the
+-- script and the other three are that quadrant turned.
+--
+-- The chunk's quadrant says what to do with it. The canonical quadrant runs the
+-- generator and the carve pass that cuts its side river; an image chunk waits
+-- for its canonical chunk and is then cloned from it; a chunk of the quadrant a
+-- three-team round leaves closed is water and nothing else.
+--
+-- The rules of the two-team path hold here unchanged, quadrant for half: never
+-- clone into a chunk the engine has not generated (entity truncation on the
+-- chunk border), keep the orbit in lockstep by requesting the members that do
+-- not exist yet, and lay a strip of water on the pre-generated tiles that the
+-- biter pathfinder could otherwise cross the river on -- on both arms now.
+
+-- The water barriers of both arms of the cross, the horizontal one exactly as
+-- the two-team map draws it and the vertical one its twin: a one-tile strip of
+-- deepwater along the axis in the chunks the engine has pre-generated tiles for
+-- but has not generated, which is the only place the rivers themselves are not
+-- there yet.
+---@param surface LuaSurface
+---@param cx integer
+---@param cy integer
+local function draw_river_end_barriers(surface, cx, cy)
+    if cy >= 0 and cy <= 3 then
+        for x = -3, 3 do
+            local chunk_pos = { x = cx + x, y = 0 }
+            if not surface.is_chunk_generated(chunk_pos) then
+                Terrain.draw_water_for_river_ends(surface, chunk_pos)
+            end
+        end
+    end
+    if cx >= 0 and cx <= 3 then
+        for y = -3, 3 do
+            local chunk_pos = { x = 0, y = cy + y }
+            if not surface.is_chunk_generated(chunk_pos) then
+                Terrain.draw_water_for_vertical_river_ends(surface, chunk_pos)
+            end
+        end
+    end
+end
+
+---@param event EventData.on_chunk_generated
+---@param surface LuaSurface
+local function on_chunk_generated_cross4(event, surface)
+    local cx, cy = event.position.x, event.position.y
+    local k = Layout.quadrant_of_chunk(cx, cy)
+
+    if Layout.is_closed_quadrant(k) then
+        Terrain.fill_chunk_with_water(surface, event.position)
+        -- The closed square draws the strips as well. A three-team
+        -- round closes the bottom-left quadrant, so every chunk that would
+        -- trigger the horizontal loop west of the axis returns here: without
+        -- this call the strip stops at chunk column -3, and the band of tiles
+        -- the engine pre-generates beyond the generated area -- where neither
+        -- Top Left's own river nor this quadrant's water exists yet -- is land
+        -- on both sides of y = 0, which the two-team and four-team maps both
+        -- cover. Nothing changes with four teams: no quadrant is closed there.
+        draw_river_end_barriers(surface, cx, cy)
+        return
+    end
+
+    local orbit = Layout.chunk_orbit(cx, cy)
+    local canonical = orbit[1]
+
+    if k == 0 then
+        Terrain.generate(event)
+        Terrain.carve_side_river(event)
+
+        -- The canonical chunk is now finished, so every image of it that the
+        -- engine has already made can take its copy.
+        for i = 2, 4 do
+            local image = orbit[i]
+            if not Layout.is_closed_quadrant(image.k) and surface.is_chunk_generated({ image.x, image.y }) then
+                Rotate_terrain.clone(surface, canonical, image, image.k)
+            end
+        end
+    elseif surface.is_chunk_generated({ canonical.x, canonical.y }) then
+        -- An image chunk whose canonical chunk exists: it has been through the
+        -- generator, since that happens inside its own on_chunk_generated.
+        Rotate_terrain.clone(surface, canonical, orbit[k + 1], k)
+    end
+
+    -- Request the rest of the orbit, maintain the lockstep. A closed quadrant is
+    -- not part of anyone's orbit and is generated only if something else asks.
+    for i = 1, 4 do
+        local member = orbit[i]
+        if not Layout.is_closed_quadrant(member.k) and not surface.is_chunk_generated({ member.x, member.y }) then
+            surface.request_to_generate_chunks({ member.x * 32, member.y * 32 }, 0)
+        end
+    end
+
+    -- The water barriers of both arms of the cross.
+    draw_river_end_barriers(surface, cx, cy)
+
+    -- The new year island decorations are not drawn on this map: they are ~40
+    -- positions around the origin placed with the global random generator, so
+    -- they are neither a quarter of anything nor reproducible by a turn.
+end
+
 local function on_chunk_generated(event)
     local surface = event.surface
 
@@ -700,6 +866,11 @@ local function on_chunk_generated(event)
 
     -- Necessary check to ignore nauvis surface.
     if surface.name ~= storage.bb_surface_name then
+        return
+    end
+
+    if Teams.layout() == 'cross4' then
+        on_chunk_generated_cross4(event, surface)
         return
     end
 
@@ -763,6 +934,11 @@ local function on_entity_cloned(event)
         return
     end
 
+    if Teams.layout() == 'cross4' then
+        Rotate_terrain.rotate_entity(event)
+        return
+    end
+
     Mirror_terrain.invert_entity(event)
 end
 
@@ -771,6 +947,15 @@ local function on_area_cloned(event)
 
     -- Check if we're out of init and not between surface hot-swap.
     if not surface or not surface.valid then
+        return
+    end
+
+    if Teams.layout() == 'cross4' then
+        -- The destination quadrant says how far the canonical chunk turned; the
+        -- hidden tiles come with the visible ones, so there is no counterpart of
+        -- the remove_hidden_tiles repair below.
+        Rotate_terrain.rotate_tiles(event)
+        Rotate_terrain.rotate_decoratives(event)
         return
     end
 

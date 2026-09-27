@@ -1,10 +1,10 @@
 local Event = require('utils.event')
 local Global = require('utils.global')
 local safe_wrap_cmd = require('utils.utils').safe_wrap_cmd
+local Teams = require('maps.biter_battles_v2.teams')
 
 local Public = {}
 
-local TEAMS = { 'north', 'south' }
 local MAX_ROWS = 8
 local ICON_COLS = 4
 local MAX_ICONS = ICON_COLS * 2
@@ -71,9 +71,11 @@ local function set_size(elem, w, h)
     elem.style.width, elem.style.height = w, h
 end
 
+--- The teams of the round, asked for at call time -- a window outlives the
+--- reset that changes them.
 ---@param fn fun(team: string)
 local function for_each_team(fn)
-    for _, team in ipairs(TEAMS) do
+    for _, team in ipairs(Teams.all()) do
         fn(team)
     end
 end
@@ -429,7 +431,7 @@ local function update_player_crafting(p_idx, just_crafted)
         return
     end
     local team = storage.chosen_team[player.name]
-    if team ~= 'north' and team ~= 'south' then
+    if not Teams.is_active(team) then
         return
     end
 
@@ -631,7 +633,7 @@ local function create_window(player)
     content.style.vertical_spacing = 2
 
     local viewer_team = storage.chosen_team[player.name]
-    local is_spectator = viewer_team ~= 'north' and viewer_team ~= 'south'
+    local is_spectator = not Teams.is_active(viewer_team)
 
     local panels = {}
     for_each_team(function(team)
@@ -717,7 +719,7 @@ commands.add_command('crafting-list', 'Toggle Crafting List window', function(cm
         end
         if visibility == 'spectators' then
             local team = storage.chosen_team[p.name]
-            if team == 'north' or team == 'south' then
+            if Teams.is_active(team) then
                 p.print('Crafting queue list is only available for spectators', { color = { r = 1, g = 0.5, b = 0.1 } })
                 return
             end
@@ -799,9 +801,15 @@ local click_handlers = {
     cql_remove = on_remove,
     cql_move_up = on_move,
     cql_move_down = on_move,
-    cql_add_north = on_add,
-    cql_add_south = on_add,
 }
+
+-- The Add buttons are dispatched by element name, and `create_team_panel` names
+-- them `cql_add_<team>`; the table is built at load time, so it has to hold
+-- every roster team rather than the ones this round happens to play, or the
+-- button of a team that only shows up after a reset would be dead.
+for _, team in ipairs(Teams.roster()) do
+    click_handlers['cql_add_' .. team] = on_add
+end
 
 Event.add(defines.events.on_gui_click, function(ev)
     local e = ev.element

@@ -4,13 +4,13 @@
 
 local Tables = require('maps.biter_battles_v2.tables')
 local FeedingCalculations = require('maps.biter_battles_v2.feeding_calculations')
+local Teams = require('maps.biter_battles_v2.teams')
+local Model = require('maps.biter_battles_v2.tt_mode_model')
 
 local math_round = math.round
 local food_values = Tables.food_values
 
 local Public = {}
-
-local BIT_TEAMS = { ['north_biters'] = 'north', ['south_biters'] = 'south' }
 
 -- Plan §A concrete: vanilla scenario uses a refined-concrete disk of radius
 -- ~ (spawn_wall_radius - 10) ≈ 105 around each spawn. "Surface ×3" → radius
@@ -18,10 +18,23 @@ local BIT_TEAMS = { ['north_biters'] = 'north', ['south_biters'] = 'south' }
 local TT_CONCRETE_VANILLA_RADIUS = 105
 local TT_CONCRETE_RADIUS = math.ceil(TT_CONCRETE_VANILLA_RADIUS * math.sqrt(3))  -- 182
 
+-- Despite the name, Triple Threat is not a two-team mode: it is what defines
+-- BB League in production, so it plays every count the round can have. The
+-- two-team sandbox it started as is one case of it -- the one whose
+-- every number and every string has to stay what it was -- and the per-team
+-- tables, the kit positions and the /tt-status columns below follow
+-- Teams.all() instead of a pair of literals.
+
 -- Reset transient tt state. Called by Public.apply() on enable and by
 -- on_map_reset() so a fresh map starts clean.
 local function reset_state()
-    storage.tt_raw_mutagen = { north_biters = 0, south_biters = 0 }
+    -- One accumulator per biter force OF THIS ROUND, built in Teams.all()
+    -- order: with two teams that is { north_biters = 0, south_biters = 0 },
+    -- the literal this line carried, and after a count change it is the new
+    -- round's forces rather than the old round's.
+    storage.tt_raw_mutagen = Teams.per_biter_force(function()
+        return 0
+    end)
     storage.tt_laser_placed = false
     storage.tt_laser_at_min = nil
     storage.tt_power_bonus_given = {}
@@ -47,10 +60,13 @@ local function lock_difficulty_80()
     storage.tournament_mode = true            -- admin-only vote attempts
 end
 
--- Force the e-miner tech researched for both teams (plan §A).
+-- Force the e-miner tech researched for every team of the round (plan §A).
+-- Team-count independent: the same one technology, set the same way, for each
+-- team in Teams.all() order — with two teams that is north then south, the
+-- order and the pair the literal list gave.
 -- Safe to call before forces exist: silently no-ops.
 local function unlock_electric_mining_drill()
-    for _, fname in pairs({ 'north', 'south' }) do
+    for _, fname in ipairs(Teams.all()) do
         local f = game.forces[fname]
         if f then
             local tech = f.technologies['electric-mining-drill']
@@ -64,8 +80,17 @@ end
 -- entity or nil. Used at map setup so the +50MW bonus location is predictable;
 -- drop_free_power() later flips the settings to deliver the bonus.
 local function create_inert_eei(surface, force_name, silo)
-    local dx = 6
-    local dy = force_name == 'north' and -6 or 6
+    -- The canonical (+6, -6) of the north side, carried into this team's
+    -- square: six tiles east of the silo and six tiles OUTWARD, away from the
+    -- river the team faces. With two teams Model.kit_offset returns the very
+    -- integers this line used to compute, -6 for north and 6 for south.
+    -- (expanded rather than one line: this file is StyLua-dirty and only the
+    -- lines the multi-team change touches are formatted — a new one-line `if` here
+    -- would be a new complaint.)
+    local dx, dy = Model.kit_offset(force_name)
+    if not dx then
+        return nil
+    end
     -- snap to integer tile centers: silos sit at half-tile centers and the
     -- 2x2 EEI snaps on placement — validating the un-snapped anchor checks a
     -- footprint shifted by (-0.5,-0.5) from the one actually occupied
@@ -100,13 +125,13 @@ local function create_inert_eei(surface, force_name, silo)
     return e
 end
 
--- Pre-place the inert power interfaces for both teams at map setup.
+-- Pre-place the inert power interfaces for every team at map setup.
 -- Idempotent: skips a team whose stored EEI is still a valid entity.
 local function place_power_interfaces()
     local surface = game.surfaces[storage.bb_surface_name]
     if not surface or not surface.valid then return end
     storage.tt_power_eei = storage.tt_power_eei or {}
-    for _, fname in pairs({ 'north', 'south' }) do
+    for _, fname in ipairs(Teams.all()) do
         local e = storage.tt_power_eei[fname]
         if not (e and e.valid) then
             local silos = storage.rocket_silo[fname]
@@ -154,7 +179,7 @@ local function paint_extended_concrete()
     if not surface or not surface.valid then return end
     local r = TT_CONCRETE_RADIUS
     local rsq = r * r
-    for _, fname in pairs({ 'north', 'south' }) do
+    for _, fname in ipairs(Teams.all()) do
         local silos = storage.rocket_silo[fname]
         if silos and silos[1] and silos[1].valid then
             local origin = silos[1].position
@@ -189,7 +214,8 @@ local function paint_extended_concrete()
 end
 
 -- Team steam-power chest (plan §A, revised 2026-06-30 bis): one shared chest
--- per team near the silo with the FULL team power kit — one player builds
+-- per team, in EVERY team's square at the turned position of the north one's
+-- (Model.kit_offset), near the silo with the FULL team power kit — one player builds
 -- power for the team instead of 3 players each hauling 1/3 of it.
 -- ~10.8 MW total: 3 offshore-pumps, 6 boilers (1.8 MW each), 12 steam-engines
 -- (0.9 MW each), 50 pipes.
@@ -197,14 +223,14 @@ local function place_power_chests()
     local surface = game.surfaces[storage.bb_surface_name]
     if not surface or not surface.valid then return end
     storage.tt_power_chest_placed = storage.tt_power_chest_placed or {}
-    for _, fname in pairs({ 'north', 'south' }) do
+    for _, fname in ipairs(Teams.all()) do
         if not storage.tt_power_chest_placed[fname] then
             local silos = storage.rocket_silo[fname]
             local silo = silos and silos[1]
-            if silo and silo.valid then
-                local dy = fname == 'north' and -6 or 6
+            local dx, dy = Model.kit_offset(fname)
+            if silo and silo.valid and dx then
                 local pos = surface.find_non_colliding_position(
-                    'steel-chest', { silo.position.x + 6, silo.position.y + dy }, 32, 1
+                    'steel-chest', { silo.position.x + dx, silo.position.y + dy }, 32, 1
                 )
                 if pos then
                     local chest = surface.create_entity({
@@ -241,7 +267,10 @@ function Public.give_starting_pack(player)
         storage.tt_initialized = true
         storage.tt_apply_pending_late = nil
     end
-    if player.force.name ~= 'north' and player.force.name ~= 'south' then return end
+    -- A team of THIS round gets the kit; spectators, the neutral player force
+    -- and a team force left over from an earlier round of another count do not.
+    -- With two teams Teams.is_active answers true for exactly north and south.
+    if not Teams.is_active(player.force.name) then return end
     if storage.tt_pack_given[player.name] then return end
     storage.tt_pack_given[player.name] = true
     player.insert({ name = 'grenade',             count = 10 })
@@ -268,37 +297,46 @@ function Public.update_ramp()
     end
     local Functions = require('maps.biter_battles_v2.functions')
     local t = Functions.get_ticks_since_game_start() / 3600  -- minutes
-    local ramp = 0
-    if t > 60 then
-        -- The +3%/min slope applies FORWARD from the first laser, never to
-        -- the minutes already ramped at +5%/min: a global slope switch would
-        -- make difficulty (and, through tt_recompute, both teams' evo) DROP
-        -- the instant a laser is placed.
-        local tl = storage.tt_laser_at_min
-        if tl then
-            if tl < 60 then tl = 60 end
-            if t <= tl then
-                ramp = (t - 60) * 0.05
-            else
-                ramp = (tl - 60) * 0.05 + (t - tl) * 0.03
-            end
-        else
-            ramp = (t - 60) * 0.05
-        end
-    end
+    -- The +3%/min slope applies FORWARD from the first laser, never to the
+    -- minutes already ramped at +5%/min: a global slope switch would make
+    -- difficulty (and, through tt_recompute, every team's evo) DROP the instant
+    -- a laser is placed. Moved into tt_mode_model.lua expression for
+    -- expression so a unit test can pin it; the 80% floor and the slopes read
+    -- a clock and a latch, never the team count, so they are the same at 2, 3
+    -- and 4 teams.
+    local ramp = Model.ramp(t, storage.tt_laser_at_min)
     storage.difficulty_vote_value = 0.8 + ramp
 end
 
 ---------------------------------------------------------------
 -- D: retroactive send — recompute canonical evo from cumulative raw mutagen.
 -- Uses feeding.Public.apply_evo_state (set, never add).
+--
+-- WHICH FEEDING PARAMETERS. This mode never picks a parameter set of its own:
+-- calc_feed_effects reads FeedingParams.get(), which is keyed by
+-- MatchFormat.format_key(), and that key is TWO parts whatever the team count
+-- -- players PER TEAM. A '2v2v2v2' round therefore plays the '2v2' set, and
+-- the recompute below is priced with the same numbers a live send is. That is
+-- a choice to revisit (match_format.lua:80-83): if four teams of two
+-- should ever be tuned apart from two teams of two, the key changes there and
+-- this function follows it for free.
 ---------------------------------------------------------------
 function Public.tt_recompute_evo(biter_force_name)
     if not storage.tt_mode then return end
     local raw = (storage.tt_raw_mutagen or {})[biter_force_name] or 0
     if raw <= 0 then return end
     local weighted = raw * storage.difficulty_vote_value
-    local players = #game.forces.north.connected_players + #game.forces.south.connected_players
+    -- The same count feeding.lua's connected_team_player_count() makes, over
+    -- the teams of the round in Teams.all() order: with two teams it is
+    -- #north + #south added in that order, an exact integer sum either way.
+    local players = 0
+    local teams = Teams.all()
+    for index = 1, #teams do
+        local force = game.forces[teams[index]]
+        if force then
+            players = players + #force.connected_players
+        end
+    end
     -- `effects.threat_increase` is DELIBERATELY discarded, and must stay that
     -- way. This replays the whole game as one send from evo 0, so with instant
     -- threat parameterised (feeding_params.lua, c * M) that field is the instant
@@ -317,7 +355,14 @@ end
 
 function Public.tt_recompute_all()
     if not storage.tt_mode then return end
-    for bf, _ in pairs(BIT_TEAMS) do
+    -- Ring order instead of the hash order of the old two-entry BIT_TEAMS.
+    -- Nothing here is order-sensitive -- tt_recompute_evo reads one force's
+    -- accumulator and writes that same force's evolution, health factor and
+    -- income, prints nothing and draws nothing -- so the two-team pair is
+    -- restated exactly as before. Above two teams an eliminated team is left
+    -- alone: it no longer feeds and is no longer fed, so its mutagen cannot
+    -- move again (Model.recompute_forces).
+    for _, bf in ipairs(Model.recompute_forces()) do
         Public.tt_recompute_evo(bf)
     end
 end
@@ -332,7 +377,7 @@ function Public.on_laser_built(entity)
     -- Only a TEAM laser counts ("once either team has placed a laser"):
     -- script-/spectator-placed turrets must not flip the ramp slope.
     local fname = entity.force and entity.force.name
-    if not (fname == 'north' or fname == 'south') then return end
+    if not Teams.is_active(fname) then return end
     if not storage.tt_laser_placed then
         storage.tt_laser_placed = true
         local Functions = require('maps.biter_battles_v2.functions')
@@ -342,7 +387,7 @@ function Public.on_laser_built(entity)
     if drop_free_power(fname, 50 * 1000000) then
         storage.tt_power_bonus_given[fname] = true
         game.print(
-            '>> [TT] ' .. fname .. ' team built first laser-turret — +50 MW bonus power live at the pre-placed power interface next to your silo.',
+            Model.laser_bonus_line(fname, Teams.count(), Teams.display_name(fname)),
             { r = 1, g = 0.85, b = 0.2 }
         )
     end
@@ -375,6 +420,12 @@ end
 -- raise_evo tick via the tt_apply_pending_late flag.
 function Public.on_map_reset()
     if not storage.tt_mode then return end
+    -- The mode SURVIVES a change of team count (2 → 4 → 2): it is what the
+    -- League plays, so a reset must not silently turn it off. What does not
+    -- survive is the round's bookkeeping — reset_state() rebuilds every
+    -- per-team table for the teams of the NEW round, so a team that is not
+    -- playing this time keeps no accumulator and a team that was not playing
+    -- last time starts at zero.
     reset_state()
     storage.tt_initialized = nil   -- new surface → full init needed
     lock_difficulty_80()
@@ -386,14 +437,29 @@ end
 ---------------------------------------------------------------
 commands.add_command('tt-enable', 'Admin only — enable Triple Threat (3v3) sandbox mode.', function(cmd)
     local player = cmd.player_index and game.get_player(cmd.player_index) or nil
-    local p = player and player.print or log
     if player and not is_admin(player) then return end
+    -- Turning the mode ON from off is what identifies the BB League server
+    -- (feeding_params.lua `is_league`), and a fresh scenario -- which the League
+    -- starts at every restart -- is the only state it is off in. So this is the
+    -- moment the League's own `bb_settings` defaults go in (tt_mode_model.lua
+    -- `league_bb_settings`): once per start, never over an admin's later toggle
+    -- while the mode stays on (a /tt-disable then /tt-enable applies them
+    -- again), and not at all on a server that never sends this command.
+    local was_off = storage.tt_mode ~= true
     storage.tt_mode = true
     Public.apply()
     game.print(
-        '>> [TT] Triple Threat (3v3) mode ENABLED. Custom 80% difficulty, vote locked, e-miner unlocked, steam-power kit on team-join.',
+        '>> [TT] '
+            .. Model.mode_label(Teams.count())
+            .. ' mode ENABLED. Custom 80% difficulty, vote locked, e-miner unlocked, steam-power kit on team-join.',
         { r = 1, g = 0.85, b = 0.2 }
     )
+    if was_off then
+        local moved = Model.apply_league_settings(storage.bb_settings)
+        if #moved > 0 then
+            game.print('>> [TT] League settings applied: ' .. table.concat(moved, ', '), { r = 1, g = 0.85, b = 0.2 })
+        end
+    end
 end)
 
 commands.add_command('tt-disable', 'Admin only — disable Triple Threat (3v3) mode.', function(cmd)
@@ -404,7 +470,7 @@ commands.add_command('tt-disable', 'Admin only — disable Triple Threat (3v3) m
     -- disable -> map reset -> enable sequence would otherwise skip the full
     -- init on the fresh map (no concrete/chests/EEIs, stale bonus flags)
     storage.tt_initialized = nil
-    game.print('>> [TT] Triple Threat (3v3) mode DISABLED (current map state preserved).')
+    game.print('>> [TT] ' .. Model.mode_label(Teams.count()) .. ' mode DISABLED (current map state preserved).')
 end)
 
 commands.add_command('tt-status', 'Show Triple Threat mode status.', function(cmd)
@@ -413,8 +479,12 @@ commands.add_command('tt-status', 'Show Triple Threat mode status.', function(cm
     local mode = storage.tt_mode and 'ON' or 'OFF'
     local diff = storage.difficulty_vote_value or 0
     local laser = storage.tt_laser_placed and 'YES' or 'NO'
-    local raw_n = (storage.tt_raw_mutagen or {}).north_biters or 0
-    local raw_s = (storage.tt_raw_mutagen or {}).south_biters or 0
+    local function raw_of(team)
+        return (storage.tt_raw_mutagen or {})[Teams.biter_force(team)] or 0
+    end
+    local function bonus_of(team)
+        return (storage.tt_power_bonus_given or {})[team]
+    end
     local function eei_state(fname)
         local e = (storage.tt_power_eei or {})[fname]
         if not (e and e.valid) then return 'missing' end
@@ -423,13 +493,11 @@ commands.add_command('tt-status', 'Show Triple Threat mode status.', function(cm
         end
         return 'inert'
     end
-    p(string.format(
-        '[TT] mode=%s  diff=%.1f%%  laser_placed=%s  raw_mutagen N=%.3f S=%.3f  power_bonus N=%s S=%s  eei N=%s S=%s',
-        mode, diff * 100, laser, raw_n, raw_s,
-        tostring((storage.tt_power_bonus_given or {}).north == true),
-        tostring((storage.tt_power_bonus_given or {}).south == true),
-        eei_state('north'), eei_state('south')
-    ))
+    -- One column per team of the round instead of the two fixed N=/S= slots
+    -- (INVENTORY §2.13). The column letter is the initial of the force name,
+    -- so with two teams the line is character for character the one this
+    -- command has always printed (pinned in tests/test-tt-mode.lua).
+    p(Model.status_line(Teams.all(), mode, diff, laser, raw_of, bonus_of, eei_state))
 end)
 
 return Public

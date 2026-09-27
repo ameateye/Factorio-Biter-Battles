@@ -11,6 +11,7 @@ local Server = require('utils.server')
 local Jail = require('utils.datastore.jail_data')
 local pool = require('maps.biter_battles_v2.pool')
 local Functions = require('maps.biter_battles_v2.functions')
+local Teams = require('maps.biter_battles_v2.teams')
 
 local Public = {}
 local match = string.match
@@ -364,7 +365,7 @@ local function on_player_used_capsule(event)
     if
         ammo_names[item.name]
         and player.physical_surface.count_entities_filtered({
-                force = player.force.name .. '_biters',
+                force = Teams.biter_force(player.force.name),
                 area = { { x - 10, y - 10 }, { x + 10, y + 10 } },
                 limit = 1,
             })

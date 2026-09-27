@@ -5,6 +5,15 @@ local bb_config = {
     ['north_side_team_name'] = 'Team North',
     ['south_side_team_name'] = 'Team South',
 
+    --Default display names of the four squares, used on the map of more than two teams
+    --(a compass name would point at the wrong corner there). Overridden by "Team Manager".
+    ['cross_team_names'] = {
+        north = 'Top Left',
+        east = 'Top Right',
+        south = 'Bottom Right',
+        west = 'Bottom Left',
+    },
+
     --TERRAIN OPTIONS--
     ['border_river_width'] = 44, --Approximate width of the horizontal impassable river separating the teams. (values up to 64)
 

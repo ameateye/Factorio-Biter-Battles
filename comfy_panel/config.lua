@@ -11,6 +11,8 @@ local Gui = require('utils.gui')
 local GUI_THEMES = require('utils.utils').GUI_THEMES
 local AiTargets = require('maps.biter_battles_v2.ai_targets')
 local FeatureFlags = require('maps.biter_battles_v2.feature_flags')
+local NteamWording = require('maps.biter_battles_v2.nteam_wording')
+local Teams = require('maps.biter_battles_v2.teams')
 local index_of = table.index_of
 
 local spaghett_entity_blacklist = {
@@ -730,7 +732,7 @@ local build_config_gui = function(player, frame)
                 switch_state,
                 'bb_team_balancing_toggle',
                 'Team Balancing',
-                'Players can only join a team that has less or equal players than the opposing.'
+                NteamWording.balancing_tooltip(Teams.count())
             )
             if not admin then
                 switch.ignored_by_interaction = true

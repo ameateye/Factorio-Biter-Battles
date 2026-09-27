@@ -2,6 +2,7 @@ local safe_wrap_with_player_print = require('utils.utils').safe_wrap_with_player
 local with_km_suffix = require('utils.utils').with_km_suffix
 local Color = require('utils.color_presets')
 local Functions = require('maps.biter_battles_v2.functions')
+local Teams = require('maps.biter_battles_v2.teams')
 
 ---Item category name to list of item names
 ---@type table<string, string[]>
@@ -236,7 +237,7 @@ local function format_items_line(items, category_items)
 end
 
 ---Get all players for a given force using storage.chosen_team
----@param force string # force name ('north' or 'south')
+---@param force string # force name of a playing team
 ---@return LuaPlayer[]
 local function get_players_for_force(force)
     local players = {}
@@ -269,7 +270,7 @@ local function inventory_scan(cmd)
     -- Determine which forces to scan
     local forces
     if player.force.name == 'spectator' then
-        forces = { 'north', 'south' }
+        forces = Teams.all()
     else
         forces = { player.force.name }
     end

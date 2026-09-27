@@ -1,5 +1,6 @@
 local CaptainUtils = require('comfy_panel.special_games.captain_utils')
 local CaptainStates = require('comfy_panel.special_games.captain_states')
+local Teams = require('maps.biter_battles_v2.teams')
 local Color = require('utils.color_presets')
 local Group = require('comfy_panel.group')
 local PlayerList = require('comfy_panel.player_list')
@@ -273,6 +274,9 @@ function Public.update_picking_ui_timer(player)
         color = Color.light_cyan
     elseif is_idle then
         local idle_force = special.next_pick_force == 'north' and 'south' or 'north'
+        if Teams.count() > 2 then
+            idle_force = player.force.name
+        end
         local idle_ticks = special.captain_pick_timer[idle_force]
         local idle_timer = ticks_to_seconds(idle_ticks)
         caption = string.format('The other team is picking. Their time: %s -- Your time: %s', timer, idle_timer)

@@ -6,6 +6,7 @@ local Public = {
         caption = 'threat threshold',
         tooltip = 'threat cant fall below threshold, fraction of excess threat is send to enemy',
     },
+    max_teams = 2,
     config = {
         [1] = { name = 'l1', type = 'label', caption = 'minimum threat amount' },
         [2] = {

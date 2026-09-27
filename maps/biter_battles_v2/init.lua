@@ -5,6 +5,8 @@ local Tables = require('maps.biter_battles_v2.tables')
 local Blueprint = require('maps.biter_battles_v2.blueprints')
 local Functions = require('maps.biter_battles_v2.functions')
 local AiTargets = require('maps.biter_battles_v2.ai_targets')
+local Layout = require('maps.biter_battles_v2.layout')
+local Teams = require('maps.biter_battles_v2.teams')
 local Pathfinder = require('commands.set_pathfinder')
 local Queue = require('utils.queue')
 local FeatureFlags = require('maps.biter_battles_v2.feature_flags')
@@ -50,6 +52,166 @@ local function createTrollSong(forceName, offset)
     end
 end
 
+---Surfaces no human force may see. `initial_setup()` hides them from the forces
+---it creates, once per save; a team force created later by
+---`Teams.ensure_forces()` gets exactly the same treatment.
+local HIDDEN_SURFACES = { 'gulag', 'nauvis' }
+
+---Hides `HIDDEN_SURFACES` from every force of `force_names`, one surface at a
+---time -- with the three human forces of a two-team game this is the call order
+---of the scenario before teams were a parameter.
+---@param force_names string[]
+local function hide_system_surfaces(force_names)
+    for _, surface_name in ipairs(HIDDEN_SURFACES) do
+        for _, force_name in ipairs(force_names) do
+            game.forces[force_name].set_surface_hidden(surface_name, true)
+        end
+    end
+end
+
+---The jail "troll song" slots on the `gulag` surface, one per human force, in
+---the order they are BUILT: the songs are real entities, so that order is the
+---order of their unit numbers. The first three entries are the three calls of
+---the two-team scenario, with their offsets and their order (south, north,
+---spectator) unchanged.
+---
+---`ring` is the roster position of the team a slot belongs to (1 north, 2 east,
+---3 south, 4 west); the slot without one is the spectators'. The two new slots
+---continue the 40-tile spacing eastwards rather than westwards: the gulag arena
+---is walled at x = +-128 (utils/datastore/jail_data.lua:139-156) and a song
+---spans [x - 11, x + 12], so x = -120 would sit on the wall and x = -160
+---outside the surface.
+---@type { x: number, ring: integer? }[]
+local JAIL_SONG_SLOTS = {
+    { x = 6, ring = 3 },
+    { x = -40, ring = 1 },
+    { x = -80 },
+    { x = 46, ring = 2 },
+    { x = 86, ring = 4 },
+}
+
+---The x offset of the jail song slot of `team`, or nil when it has none.
+---@param team string
+---@return number|nil
+local function jail_song_x(team)
+    local ring = Teams.ring_index(team)
+    if not ring then
+        return nil
+    end
+    for _, slot in ipairs(JAIL_SONG_SLOTS) do
+        if slot.ring == ring then
+            return slot.x
+        end
+    end
+    return nil
+end
+
+---The team playing at ring position `ring` this round, or nil when there is
+---none.
+---@param ring integer
+---@return string|nil
+local function active_team_at_ring(ring)
+    for _, team in ipairs(Teams.all()) do
+        if Teams.ring_index(team) == ring then
+            return team
+        end
+    end
+    return nil
+end
+
+---The one-shot, per-save setup of a team force: the system surfaces stay hidden
+---from it and it gets its own jail song slot. `initial_setup()` does this work
+---for the forces it creates, with the two helpers above and in the order the
+---two-team scenario did it in; this is the same work for a team force that
+---`Teams.ensure_forces()` created later, at a map reset.
+---@param team string
+local function setup_new_team_force(team)
+    hide_system_surfaces({ team })
+    local x = jail_song_x(team)
+    if x then
+        createTrollSong(team, { x = x, y = 0 })
+    end
+end
+
+---Where a team's players spawn: the geometry model's answer (`layout.lua`).
+---
+---Two teams get today's two literals, {0, -44} and {0, 44}, one on each side of
+---the river along y = 0 -- `Layout` returns them in the `{ x =, y = }` form
+---rather than the array one, which `set_spawn_position` reads the same way. The
+---four-square map gets the canonical spawn {-44, -44} turned into each team's
+---quadrant, off both of its rivers.
+---@param team string
+---@return MapPosition|nil nil for a team with no zone on this map.
+local function team_spawn_position(team)
+    return Layout.spawn_position(team)
+end
+
+---The forces of the roster teams that do NOT play this round and that some
+---earlier round created: the team force, its biters and its boss biters, in
+---roster order. Empty in a save that never played more than two teams -- east
+---and west simply do not exist there.
+---@return string[]
+local function dormant_team_force_names()
+    local forces = game.forces
+    local names = {}
+    for _, team in ipairs(Teams.roster()) do
+        if not Teams.is_active(team) then
+            local own = { team, Teams.biter_force(team), Teams.boss_force(team) }
+            for _, name in ipairs(own) do
+                if forces[name] then
+                    names[#names + 1] = name
+                end
+            end
+        end
+    end
+    return names
+end
+
+---Take the diplomacy of those dormant forces back to nothing, both ways,
+---against every force that exists.
+---
+---`Public.forces()` only ever sets relations to TRUE and `LuaForce.reset()`
+---does not touch diplomacy, so without this the friendships of a four-team
+---round would survive into every later round: `north_biters` would stay friends
+---with a dormant `east`, and the first change that puts an entity on a dormant
+---force would inherit that silently. The forces of the teams that DO play are
+---not touched -- the block below rebuilds their whole matrix anyway.
+---
+---`set_friend` / `set_cease_fire` are one-way writes with no side effect, so
+---the resulting matrix does not depend on the order the forces come back in.
+local function clear_dormant_team_relations()
+    for _, name in ipairs(dormant_team_force_names()) do
+        local f = game.forces[name]
+        for _, other in pairs(game.forces) do
+            if other.name ~= name then
+                f.set_friend(other, false)
+                f.set_cease_fire(other, false)
+                other.set_friend(f, false)
+                other.set_cease_fire(f, false)
+            end
+        end
+    end
+end
+
+---A fresh empty table, for the per-team builders of `Public.tables()`.
+---@return table
+local function new_table()
+    return {}
+end
+
+---The biter spawn types a side has not been shown yet at the start of a round.
+---@return table<string, boolean>
+local function unseen_biter_spawns()
+    return {
+        ['medium-spitter'] = true,
+        ['medium-biter'] = true,
+        ['big-spitter'] = true,
+        ['big-biter'] = true,
+        ['behemoth-spitter'] = true,
+        ['behemoth-biter'] = true,
+    }
+end
+
 ---Creates a default settings structure
 local function default_player_settings()
     return {
@@ -77,20 +239,28 @@ function Public.initial_setup()
 
     Pathfinder.apply()
 
-    game.create_force('north')
-    game.create_force('south')
-    game.create_force('north_biters')
-    game.create_force('south_biters')
-    game.create_force('north_biters_boss')
-    game.create_force('south_biters_boss')
+    -- The teams, then their biters, then their boss biters, then the
+    -- spectators: the creation order of the two-team scenario, and force
+    -- indices depend on it (`storage.biter_health_factor` is keyed by index).
+    -- `Public.tables()` has already run `Teams.begin_round()`, so this is the
+    -- round's team list; forces for teams that only a later round needs are
+    -- created by `Teams.ensure_forces()` in `Public.forces()`, after these.
+    for _, team in ipairs(Teams.all()) do
+        game.create_force(team)
+    end
+    for _, biter_force in ipairs(Teams.biter_forces()) do
+        game.create_force(biter_force)
+    end
+    for _, boss_force in ipairs(Teams.boss_forces()) do
+        game.create_force(boss_force)
+    end
     game.create_force('spectator')
 
-    game.forces.spectator.set_surface_hidden('gulag', true)
-    game.forces.north.set_surface_hidden('gulag', true)
-    game.forces.south.set_surface_hidden('gulag', true)
-    game.forces.spectator.set_surface_hidden('nauvis', true)
-    game.forces.north.set_surface_hidden('nauvis', true)
-    game.forces.south.set_surface_hidden('nauvis', true)
+    local human_forces = { 'spectator' }
+    for _, team in ipairs(Teams.all()) do
+        human_forces[#human_forces + 1] = team
+    end
+    hide_system_surfaces(human_forces)
     game.forces.spectator.research_all_technologies()
     local defs = {
         defines.input_action.import_blueprint_string,
@@ -168,6 +338,8 @@ function Public.initial_setup()
         --MAP SETTINGS--
         ['new_year_island'] = false,
         ['bb_map_reveal_toggle'] = true,
+        -- false on the BB League server, written over this at `/tt-enable`
+        -- (tt_mode_model.lua `league_bb_settings`).
         ['automatic_captain'] = true,
         ['map_reroll'] = true,
         ['burners_balance'] = true,
@@ -203,9 +375,17 @@ function Public.initial_setup()
     for chunk in surface.get_chunks() do
         surface.delete_chunk({ chunk.x, chunk.y })
     end
-    createTrollSong(game.forces.south.name, { x = 6, y = 0 })
-    createTrollSong(game.forces.north.name, { x = -40, y = 0 })
-    createTrollSong(game.forces.spectator.name, { x = -80, y = 0 })
+    for _, slot in ipairs(JAIL_SONG_SLOTS) do
+        local force_name
+        if slot.ring then
+            force_name = active_team_at_ring(slot.ring)
+        else
+            force_name = 'spectator'
+        end
+        if force_name then
+            createTrollSong(force_name, { x = slot.x, y = 0 })
+        end
+    end
     AiTargets.refresh_target_types()
 end
 
@@ -221,8 +401,52 @@ function Public.playground_surface()
     Daytime.apply_daytime_settings(surface)
 end
 
+---A team that has no silo cannot lose one, and the round ends when one team is
+---left: on a map that gave only some of the teams a silo the others would be
+---immortal and the round could never finish, reset or arm the restart timer.
+---
+---So, ABOVE TWO TEAMS ONLY, a team the map put no silo down for is out before
+---the round starts. On the legacy two-team map that is east and west, and a
+---three- or four-team round there degenerates to the two teams that do have a
+---base rather than hanging for ever. On the four-square map every team gets a
+---silo and this rule does not fire.
+---
+---Silently: the players have not joined yet and there is nobody to tell, so the
+---only trace is one log line. Called at the end of `Public.draw_structures()`,
+---the one point where the initial structures exist in both reset paths
+---(`main.lua` on_init and `game_over.lua` `generate_new_map`).
+local function eliminate_teams_without_a_silo()
+    if Teams.count() <= 2 then
+        return
+    end
+    local eliminated = {}
+    for _, team in ipairs(Teams.all()) do
+        local silos = storage.rocket_silo[team]
+        if not silos or #silos == 0 then
+            -- Out before the round started, so not ranked: `Teams.placement()`
+            -- is a ranking of the teams that played, and a team with no base
+            -- did not come last, it did not take part.
+            Teams.eliminate(team, true)
+            eliminated[#eliminated + 1] = team
+        end
+    end
+    if #eliminated > 0 then
+        log(
+            'This map has no rocket silo for '
+                .. table.concat(eliminated, ', ')
+                .. ': eliminated before the round starts so that it can end.'
+        )
+    end
+end
+
 function Public.draw_structures()
-    Terrain.generate_initial_structures(game.surfaces[storage.bb_surface_name])
+    local surface = game.surfaces[storage.bb_surface_name]
+    if Teams.layout() == 'cross4' then
+        Terrain.generate_initial_structures_cross4(surface)
+    else
+        Terrain.generate_initial_structures(surface)
+    end
+    eliminate_teams_without_a_silo()
 end
 
 function Public.queue_reveal_map()
@@ -232,6 +456,12 @@ function Public.queue_reveal_map()
 
     local width = 750 -- for one side (Carl 06/09: was 2000; smaller download, lighter autosaves)
     local height = 500 -- for one side
+    if Teams.layout() == 'cross4' then
+        -- Two halves become four quadrants, so the map is as tall as it is wide
+        -- and the reveal is a square. The push loop below is already four-fold
+        -- symmetric and needs nothing else.
+        height = width
+    end
 
     for x = 16, width, 32 do
         for y = 16, height, 32 do
@@ -280,18 +510,39 @@ function Public.pop_chunk_request(max_requests)
 end
 
 function Public.tables()
+    -- The one point where the team count of a round changes: everything below
+    -- is built for the teams it settles on, and so is everything `Public.forces()`
+    -- does afterwards.
+    Teams.begin_round()
+
+    -- The chat commands of the teams outside the legacy pair. They are not
+    -- registered at load, so that a two-team server keeps exactly today's
+    -- command list, and appear the first time a round needs them -- in the same
+    -- tick on the server and on every connected client, since they all run this
+    -- reset; a client that joins later registers them from the same latch in
+    -- `on_load` (commands/chat_commands.lua). The require is lazy: `commands.lua`
+    -- loads that module long before this one, and a two-team round does not even
+    -- look it up.
+    if Teams.extra_chat_commands() then
+        require('commands.chat_commands').register_extra_team_chat()
+    end
+
     local get_score = Score.get_table()
     get_score.score_table = {}
-    storage.research_info = { completed = {}, current_progress = { north = {}, south = {} } }
+    storage.research_info = { completed = {}, current_progress = Teams.per_team(new_table) }
     storage.science_logs_text = nil
-    storage.science_logs_total_north = nil
-    storage.science_logs_total_south = nil
+    -- Every ROSTER team, not only the ones playing: after a four-team round
+    -- `science_logs_total_east` and `..._west` would otherwise sit in the save
+    -- for ever. Clearing a key that was never written is a no-op, so a save
+    -- that only ever plays two teams clears exactly the two keys it has.
+    for _, team in ipairs(Teams.roster()) do
+        storage['science_logs_total_' .. team] = nil
+    end
     ---@type TeamStats
     storage.team_stats = {
-        forces = {
-            north = { items = {}, food = {}, damage_types = {} },
-            south = { items = {}, food = {}, damage_types = {} },
-        },
+        forces = Teams.per_team(function()
+            return { items = {}, food = {}, damage_types = {} }
+        end),
     }
     storage.last_teamstats_print_at = 0
     -- Name of main BB surface within game.surfaces
@@ -326,6 +577,10 @@ function Public.tables()
     storage.bb_evolution = {}
     storage.benchmark_mode = false
     storage.bb_game_won_by_team = nil
+    -- Written by the game-over path: it is
+    -- cleared here so that the placement of a four-team round cannot outlive it
+    -- into the save and into a later two-team round.
+    storage.bb_placement = nil
     storage.bb_game_start_tick = nil
     storage.bb_threat = {}
     storage.bb_threat_income = {}
@@ -339,66 +594,31 @@ function Public.tables()
     storage.map_pregen_message_counter = {}
     ---Refers to primary silos, which is either the silo generated in spawn
     ---or any that's placed in multi-silo special.
-    storage.rocket_silo = {
-        ---@type LuaEntity[]
-        ---Silos belonging to north
-        north = {},
-        ---@type LuaEntity[]
-        ---Silos belonging to south
-        south = {},
-    }
+    ---@type table<string, LuaEntity[]> The silos of each team, keyed by team name.
+    storage.rocket_silo = Teams.per_team(new_table)
     storage.spectator_rejoin_delay = {}
     storage.spy_fish_timeout = {}
     storage.tm_custom_name = {}
     storage.total_passive_feed_redpotion = 0
-    storage.pending_autofeed_counts = {}
-    storage.pending_autofeed_counts['north'] = {}
-    storage.pending_autofeed_counts['south'] = {}
-    storage.unit_spawners = {}
+    storage.pending_autofeed_counts = Teams.per_team(new_table)
+    storage.unit_spawners = Teams.per_biter_force(new_table)
     ---@type table<integer, HighHealthUnit>
     storage.high_health_units = {}
-    storage.unit_spawners.north_biters = {}
-    storage.unit_spawners.south_biters = {}
     storage.ai_targets = {}
     storage.player_data_afk = {}
     storage.max_group_size_initial = 300 --Maximum unit group size for all biters at start, just used as a reference, doesnt change initial group size.
-    storage.max_group_size = {}
-    storage.max_group_size['north_biters'] = 300 --Maximum unit group size for north biters.
-    storage.max_group_size['south_biters'] = 300 --Maximum unit group size for south biters.
-    storage.biter_spawn_unseen = {
-        ['north'] = {
-            ['medium-spitter'] = true,
-            ['medium-biter'] = true,
-            ['big-spitter'] = true,
-            ['big-biter'] = true,
-            ['behemoth-spitter'] = true,
-            ['behemoth-biter'] = true,
-        },
-        ['south'] = {
-            ['medium-spitter'] = true,
-            ['medium-biter'] = true,
-            ['big-spitter'] = true,
-            ['big-biter'] = true,
-            ['behemoth-spitter'] = true,
-            ['behemoth-biter'] = true,
-        },
-        ['north_biters_boss'] = {
-            ['medium-spitter'] = true,
-            ['medium-biter'] = true,
-            ['big-spitter'] = true,
-            ['big-biter'] = true,
-            ['behemoth-spitter'] = true,
-            ['behemoth-biter'] = true,
-        },
-        ['south_biters_boss'] = {
-            ['medium-spitter'] = true,
-            ['medium-biter'] = true,
-            ['big-spitter'] = true,
-            ['big-biter'] = true,
-            ['behemoth-spitter'] = true,
-            ['behemoth-biter'] = true,
-        },
-    }
+    --Maximum unit group size, per regular biter force. The boss forces are not
+    --seeded, exactly as they were not before teams became a parameter.
+    storage.max_group_size = Teams.per_biter_force(function()
+        return 300
+    end)
+    --The spawn types a side has not been shown yet. Two key conventions live
+    --here and both are kept: the regular biters are keyed by TEAM name and the
+    --boss biters by BOSS FORCE name (ai.lua:187,198 reads them that way).
+    storage.biter_spawn_unseen = Teams.per_team(unseen_biter_spawns)
+    for _, team in ipairs(Teams.all()) do
+        storage.biter_spawn_unseen[Teams.boss_force(team)] = unseen_biter_spawns()
+    end
     storage.difficulty_vote_value = 0.75
     storage.difficulty_vote_index = 4
 
@@ -420,9 +640,18 @@ function Public.tables()
     storage.bb_pathfinder = storage.bb_pathfinder or Pathfinder.get_preset('bb-new')
 
     local rng = game.create_random_generator(storage.next_map_seed)
-    storage.next_attack = 'north'
-    if rng(1, 2) == 1 then
-        storage.next_attack = 'south'
+    local active = Teams.all()
+    if Teams.count() == 2 then
+        -- The draw of the two-team scenario, kept expression for expression:
+        -- ONE `rng(1, 2)`, and a result of 1 means the SECOND team, not the
+        -- first. `active[rng(1, #active)]` would flip the first attacker on
+        -- every seed.
+        storage.next_attack = active[1]
+        if rng(1, 2) == 1 then
+            storage.next_attack = active[2]
+        end
+    else
+        storage.next_attack = active[rng(1, #active)]
     end
 
     -- Clear all ping UIs.  Otherwise, if a map reset happens when a ping is
@@ -452,6 +681,13 @@ function Public.tables()
 end
 
 function Public.forces()
+    -- Teams that this round needs and earlier rounds did not: their forces are
+    -- created here, after the ones `initial_setup()` made, so no existing force
+    -- index moves. A two-team round creates nothing.
+    for _, team in ipairs(Teams.ensure_forces()) do
+        setup_new_team_force(team)
+    end
+
     for _, force in pairs(game.forces) do
         if force.name ~= 'spectator' then
             force.reset()
@@ -459,77 +695,86 @@ function Public.forces()
         end
     end
 
+    -- Relations only accumulate: everything below sets TRUE and the `reset()`
+    -- above does not clear diplomacy. Whatever a round of another size left on
+    -- the forces it is no longer playing with goes first, so that the matrix
+    -- this round ends up with is the matrix this round built. Not one API call
+    -- in a save that never played more than two teams.
+    clear_dormant_team_relations()
+
     local surface = game.surfaces[storage.bb_surface_name]
+    local teams = Teams.all()
 
-    local f = game.forces['north']
-    f.set_spawn_position({ 0, -44 }, surface)
-    f.set_cease_fire('player', true)
-    f.set_friend('spectator', true)
-    f.set_friend('south_biters', true)
-    f.set_friend('south_biters_boss', true)
-    f.share_chart = true
+    -- Every biter force of the round, the regular ones first and then the
+    -- bosses: `north_biters, south_biters, north_biters_boss, south_biters_boss`
+    -- for two teams.
+    ---@type { name: string, team: string }[]
+    local biters = {}
+    for _, team in ipairs(teams) do
+        biters[#biters + 1] = { name = Teams.biter_force(team), team = team }
+    end
+    for _, team in ipairs(teams) do
+        biters[#biters + 1] = { name = Teams.boss_force(team), team = team }
+    end
 
-    local f = game.forces['south']
-    f.set_spawn_position({ 0, 44 }, surface)
-    f.set_cease_fire('player', true)
-    f.set_friend('spectator', true)
-    f.set_friend('north_biters', true)
-    f.set_friend('north_biters_boss', true)
-    f.share_chart = true
+    -- A team: friend with the spectators and with every biter force but its own
+    -- two, at cease-fire with the vanilla player force.
+    for _, team in ipairs(teams) do
+        local f = game.forces[team]
+        f.set_spawn_position(team_spawn_position(team), surface)
+        f.set_cease_fire('player', true)
+        f.set_friend('spectator', true)
+        for _, biter in ipairs(biters) do
+            if biter.team ~= team then
+                f.set_friend(biter.name, true)
+            end
+        end
+        f.share_chart = true
+    end
 
-    local f = game.forces['north_biters']
-    f.set_friend('south_biters', true)
-    f.set_friend('south_biters_boss', true)
-    f.set_friend('north_biters_boss', true)
-    f.set_friend('south', true)
-    f.set_friend('player', true)
-    f.set_friend('spectator', true)
-    f.share_chart = false
+    -- A biter force: friend with every other biter force, with every team but
+    -- the one it hunts, and with the player and spectator forces.
+    for _, biter in ipairs(biters) do
+        local f = game.forces[biter.name]
+        for _, other in ipairs(biters) do
+            if other.name ~= biter.name then
+                f.set_friend(other.name, true)
+            end
+        end
+        for _, team in ipairs(teams) do
+            if team ~= biter.team then
+                f.set_friend(team, true)
+            end
+        end
+        f.set_friend('player', true)
+        f.set_friend('spectator', true)
+        f.share_chart = false
+    end
 
-    local f = game.forces['south_biters']
-    f.set_friend('north_biters', true)
-    f.set_friend('north_biters_boss', true)
-    f.set_friend('south_biters_boss', true)
-    f.set_friend('north', true)
-    f.set_friend('player', true)
-    f.set_friend('spectator', true)
-    f.share_chart = false
-
-    local f = game.forces['north_biters_boss']
-    f.set_friend('south_biters', true)
-    f.set_friend('north_biters', true)
-    f.set_friend('south_biters_boss', true)
-    f.set_friend('south', true)
-    f.set_friend('player', true)
-    f.set_friend('spectator', true)
-    f.share_chart = false
-
-    local f = game.forces['south_biters_boss']
-    f.set_friend('north_biters', true)
-    f.set_friend('south_biters', true)
-    f.set_friend('north_biters_boss', true)
-    f.set_friend('north', true)
-    f.set_friend('player', true)
-    f.set_friend('spectator', true)
-    f.share_chart = false
-
+    -- The spectators and the vanilla player force. Both know the regular biter
+    -- forces and not the boss ones: that asymmetry is the scenario's and is
+    -- reproduced, not repaired.
     local f = game.forces['spectator']
     f.set_spawn_position({ 0, 0 }, surface)
     f.technologies['toolbelt'].researched = true
-    f.set_cease_fire('north_biters', true)
-    f.set_cease_fire('south_biters', true)
-    f.set_friend('north', true)
-    f.set_friend('south', true)
+    for _, team in ipairs(teams) do
+        f.set_cease_fire(Teams.biter_force(team), true)
+    end
+    for _, team in ipairs(teams) do
+        f.set_friend(team, true)
+    end
     f.set_cease_fire('player', true)
     f.share_chart = true
 
-    local f = game.forces['player']
+    f = game.forces['player']
     f.set_spawn_position({ 0, 0 }, surface)
     f.set_cease_fire('spectator', true)
-    f.set_cease_fire('north_biters', true)
-    f.set_cease_fire('south_biters', true)
-    f.set_cease_fire('north', true)
-    f.set_cease_fire('south', true)
+    for _, team in ipairs(teams) do
+        f.set_cease_fire(Teams.biter_force(team), true)
+    end
+    for _, team in ipairs(teams) do
+        f.set_cease_fire(team, true)
+    end
     f.share_chart = false
 
     for _, force in pairs(game.forces) do
@@ -547,13 +792,22 @@ function Public.forces()
         storage.bb_threat_income[force.name] = 0
         storage.bb_threat[force.name] = 0
     end
-    for _, force in pairs(Tables.ammo_modified_forces_list) do
+    -- `Tables.ammo_modified_forces_list` for this round: the teams, then the
+    -- spectators. The constant in tables.lua is the two-team value of the same
+    -- list and is left where it is.
+    local ammo_modified_forces = {}
+    for i, team in ipairs(teams) do
+        ammo_modified_forces[i] = team
+    end
+    ammo_modified_forces[#ammo_modified_forces + 1] = 'spectator'
+
+    for _, force in ipairs(ammo_modified_forces) do
         for ammo_category, value in pairs(Tables.base_ammo_modifiers) do
             game.forces[force].set_ammo_damage_modifier(ammo_category, value)
         end
     end
 
-    for _, force in pairs(Tables.ammo_modified_forces_list) do
+    for _, force in ipairs(ammo_modified_forces) do
         for turret_category, value in pairs(Tables.base_turret_attack_modifiers) do
             game.forces[force].set_turret_attack_modifier(turret_category, value)
         end

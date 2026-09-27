@@ -2,6 +2,7 @@ local ItemCosts = require('maps.biter_battles_v2.item_costs')
 local safe_wrap_with_player_print = require('utils.utils').safe_wrap_with_player_print
 local with_km_suffix = require('utils.utils').with_km_suffix
 local Functions = require('maps.biter_battles_v2.functions')
+local Teams = require('maps.biter_battles_v2.teams')
 
 local function inventory_cost(player)
     local container = nil
@@ -54,7 +55,7 @@ local function inventory_costs(cmd)
     end
     local forces
     if player.force.name == 'spectator' or cmd.parameter == 'all' then
-        forces = { 'north', 'south' }
+        forces = Teams.all()
     else
         forces = { player.force.name }
     end

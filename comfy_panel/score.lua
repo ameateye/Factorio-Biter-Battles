@@ -2,6 +2,7 @@
 
 local Event = require('utils.event')
 local Functions = require('maps.biter_battles_v2.functions')
+local Teams = require('maps.biter_battles_v2.teams')
 local Global = require('utils.global')
 local Tabs = require('comfy_panel.main')
 
@@ -54,7 +55,10 @@ end
 local function get_score_list(force)
     local score_force = this.score_table
     local score_list = {}
-    for p, team in pairs(storage.chosen_team) do
+    -- `round_players` is `storage.chosen_team` itself at two teams; above two
+    -- it adds the players of the eliminated teams, whose choice was cleared when
+    -- they were moved to the spectators.
+    for p, team in pairs(Teams.round_players(storage.chosen_team)) do
         if force == team or force == 'spectator' then
             local score = score_force[team] and score_force[team].players[p] or {}
             table.insert(score_list, {

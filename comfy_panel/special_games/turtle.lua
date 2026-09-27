@@ -57,6 +57,7 @@ end
 
 local Public = {
     name = { type = 'label', caption = 'Turtle', tooltip = 'Generate moat with given dimensions around the spawn' },
+    max_teams = 2,
     config = {
         [1] = { name = 'label1', type = 'label', caption = 'moat width' },
         [2] = { name = 'moat_width', type = 'textfield', text = '5', numeric = true, width = 40 },

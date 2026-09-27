@@ -5,7 +5,9 @@ local Event = require('utils.event')
 local bb_config = require('maps.biter_battles_v2.config')
 local Force = require('utils.force')
 local MultiSilo = require('comfy_panel.special_games.multi_silo')
+local StrikeGeometry = require('maps.biter_battles_v2.strike_geometry')
 local Table = require('utils.table')
+local Teams = require('maps.biter_battles_v2.teams')
 
 local math_random = math.random
 local math_sqrt = math.sqrt
@@ -40,6 +42,15 @@ for p = 0.3, 0.71, 0.1 do
     attack_vectors.south[#attack_vectors.south + 1] = { x, y }
 end
 local size_of_vectors = #attack_vectors.north
+--The set the four-square map turns for every team: the very list the loop above
+--filled for the canonical team -- the first of the ring, the team whose zone
+--`layout.lua` turns onto the other three -- reached through the registry rather
+--than by name. Turning a vector by k quarter turns and adding it in the world
+--frame is the same as adding it in the canonical frame and turning the waypoint,
+--so the cross path works canonically and needs no per-team copy of the table
+--(and must not read the `south` set for it: that one is a REFLECTION of the
+--canonical set, which is the two-team map's transform, not the pinwheel's).
+local canonical_attack_vectors = attack_vectors[Teams.roster()[1]]
 
 local function calculate_secant_intersections(r, a, b, c)
     local t = a * a + b * b
@@ -151,7 +162,38 @@ local function select_strike_position(source_position, target_position, boundary
     }
 end
 
+---The strike position on the four-square map: the same question, asked in the
+---victim's canonical frame, where a zone is a quadrant and the arc the wave may
+---swing out on has a second river to clear (`strike_geometry.lua`).
+---
+---nil when the group's force names no team, or when nothing is left of the arc.
+---`initiate_advanced_attack` then charges the target with no flank at all, which
+---is what a nil strike position has always meant here, and `ai.lua:423-426` logs
+---the skipped flank.
+---@param unit_group LuaCommandable
+---@param target_position MapPosition
+---@return MapPosition|nil
+local function calculate_strike_position_cross(unit_group, target_position)
+    local team = Teams.team_of_biter_force(unit_group.force.name)
+    if not team then
+        return nil
+    end
+    local source_position = unit_group.position
+    local x, y =
+        StrikeGeometry.strike_position(team, source_position.x, source_position.y, target_position.x, target_position.y)
+    if not x then
+        return nil
+    end
+    return unit_group.surface.find_non_colliding_position('stone-furnace', { x = x, y = y }, 96, 1)
+end
+
 function Public.calculate_strike_position(unit_group, target_position)
+    -- Above two teams the fold below is the wrong one -- it knows one river and
+    -- mirrors on the sign of the group's own y -- so the four-square map asks in
+    -- its own frame. The two-team body is untouched, quirk included.
+    if Teams.layout() ~= 'horizontal2' then
+        return calculate_strike_position_cross(unit_group, target_position)
+    end
     local source_position = unit_group.position
     local normalized_source_position = { x = source_position.x, y = math_abs(source_position.y) }
     local normalized_target_position = { x = target_position.x, y = math_abs(target_position.y) }
@@ -198,6 +240,88 @@ function Public.append_silo_commands(chain, target_force_name, distraction)
     end
 end
 
+---The classic command chain on the four-square map. The chain is the legacy one
+---command for command -- a `go_to_location` on the way in, an `attack_area` on
+---the target, then one `attack` per live silo in shuffled order, joined with
+---`logical_and` -- and so are the two draws, the vector index and the distance
+---modifier, in that order.
+---
+---What differs is the frame. The waypoint is built where the vectors were drawn,
+---in the victim's canonical frame, and turned back into the world; three of the
+---five vectors lean towards the side river, so a target near it has the vector
+---mirrored or the waypoint clamped rather than being sent across
+---(`strike_geometry.lua`). "Closer to the enemy than the group is" is read in
+---that frame too, instead of as the smaller `|y|` of the two-team map.
+---@param unit_group LuaCommandable
+---@param target_force_name string
+---@param target_position MapPosition
+local function initiate_classic_attack_cross(unit_group, target_force_name, target_position)
+    local chain = {}
+    local vector = canonical_attack_vectors[math_random(1, size_of_vectors)]
+    local distance_modifier = math_random(25, 100) * 0.01
+
+    local waypoint_x, waypoint_y = StrikeGeometry.classic_waypoint(
+        target_force_name,
+        target_position.x,
+        target_position.y,
+        vector[1],
+        vector[2],
+        distance_modifier
+    )
+    local position = waypoint_x
+        and unit_group.surface.find_non_colliding_position('stone-furnace', { waypoint_x, waypoint_y }, 96, 1)
+    if position then
+        local group_position = unit_group.position
+        if
+            StrikeGeometry.is_towards_river(
+                target_force_name,
+                position.x,
+                position.y,
+                group_position.x,
+                group_position.y
+            )
+        then
+            chain[#chain + 1] = {
+                type = defines.command.go_to_location,
+                destination = position,
+                radius = 32,
+                distraction = defines.distraction.by_enemy,
+            }
+        end
+    end
+
+    chain[#chain + 1] = {
+        type = defines.command.attack_area,
+        destination = target_position,
+        radius = 32,
+        distraction = defines.distraction.by_enemy,
+    }
+
+    -- An active team always has a silo list (`init.lua:581` builds one per
+    -- team); the guard is for a force that is not playing this round, which the
+    -- scheduler cannot hand us and the legacy line below would index nil for.
+    local list = storage.rocket_silo[target_force_name]
+    if list then
+        local indices = Table.shuffle_indices(list)
+        for _, i in ipairs(indices) do
+            local silo = list[i]
+            if silo and silo.valid then
+                chain[#chain + 1] = {
+                    type = defines.command.attack,
+                    target = silo,
+                    distraction = defines.distraction.by_damage,
+                }
+            end
+        end
+    end
+
+    unit_group.set_command({
+        type = defines.command.compound,
+        structure_type = defines.compound_command.logical_and,
+        commands = chain,
+    })
+end
+
 ---Provides the command chain for a new biter group using classic pathfinding logic, see notes in ai_strikes.lua for an explanation
 ---of the differences between advanced and classic pathfinding
 ---This biter group will take a direct path to the target_position using classic attack_vectors in ai_strikes.lua
@@ -207,6 +331,13 @@ end
 function Public.initiate_classic_attack(unit_group, target_force_name, target_position)
     if storage.bb_game_won_by_team then
         return
+    end
+
+    -- The vector table below has one set per side of the two-team map, so above
+    -- two teams there is nothing to index: the four-square map builds its
+    -- waypoint from the canonical set instead. The two-team body is untouched.
+    if Teams.layout() ~= 'horizontal2' then
+        return initiate_classic_attack_cross(unit_group, target_force_name, target_position)
     end
 
     local chain = {}

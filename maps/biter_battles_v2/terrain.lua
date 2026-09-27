@@ -2,6 +2,8 @@ local Public = {}
 local LootRaffle = require('functions.loot_raffle')
 local BiterRaffle = require('maps.biter_battles_v2.biter_raffle')
 local bb_config = require('maps.biter_battles_v2.config')
+local Layout = require('maps.biter_battles_v2.layout')
+local Teams = require('maps.biter_battles_v2.teams')
 local mixed_ore_map_special = require('maps.biter_battles_v2.mixed_ore_map_special')
 local multi_octave_noise = require('utils.multi_octave_noise')
 local noise = require('maps.biter_battles_v2.predefined_noise')
@@ -360,6 +362,51 @@ local function river_start(seed, x, include_spawn_circle)
     return start
 end
 
+---True for a tile of the canonical quadrant that the SIDE river covers.
+---
+---The four-square map gives every team a second river, along the other axis, and
+---that river is the legacy one TRANSPOSED: the tile (x, y) is side-river water
+---exactly when the legacy generator makes the tile (y, x) front-river water.
+---Same half width, same 4096-entry offset table (read at the OTHER coordinate)
+---and the same central lake of radius `river_circle_size`, so the four arms of
+---the cross meet in one round lake.
+---
+---`river_start` already answers "where does the water of this COLUMN start";
+---handed the row instead of the column it answers "where does the water of this
+---ROW start", and that is the whole of the transposition. `y >= -64 and y < 64`
+---is `generate_river`'s own `chunk_pos.x >= -2 and chunk_pos.x < 2` transposed:
+---the rows the central lake reaches.
+---
+---The spectator island is water in neither arm, so it is cut out of this one too.
+---Nothing on the two-team map calls this.
+---@param seed uint
+---@param x number tile x
+---@param y number tile y
+---@return boolean
+function Public.is_side_river_tile(seed, x, y)
+    if is_within_spawn_island(x, y) then
+        return false
+    end
+    return x >= river_start(seed, y, y >= -64 and y < 64)
+end
+
+local is_side_river_tile = Public.is_side_river_tile
+
+---True for a canonical chunk the side river can reach -- the chunks the carve
+---pass has to visit, and the only ones.
+---
+---It is `chunk_type_at`'s river test transposed and cut down to the canonical
+---quadrant: `cy == -1 or (cy == -2 and cx in {-1, 0})` becomes
+---`cx == -1 or (cx == -2 and cy in {-1, 0})`, of which only `cy == -1` is
+---canonical. The arm itself is never wider than `river_width_half + 4 = 26`
+---tiles and so lives in chunk column -1; only the lake reaches further west, to
+---x = -39, and only for the rows next to the axis.
+---@param chunk_pos {x: int, y: int} canonical chunk position (not tile position)
+---@return boolean
+function Public.chunk_has_side_river(chunk_pos)
+    return chunk_pos.x == -1 or (chunk_pos.x == -2 and chunk_pos.y == -1)
+end
+
 ---@param chunk_pos {x: number, y: number}
 local function is_outside_spawn(chunk_pos)
     return chunk_pos.x < -5 or chunk_pos.x >= 5 or chunk_pos.y < -5
@@ -437,7 +484,8 @@ local spawn_wall_noise_radius = spawn_wall_radius + (4.5 + spawn_wall_noise_devi
 ---@param surface LuaSurface
 ---@param chunk_pos {x: number, y: number}
 ---@param rng LuaRandomGenerator
-local function generate_starting_area(surface, chunk_pos, rng)
+---@param cross4 boolean|nil four-square map: clip the ring at the SIDE river too
+local function generate_starting_area(surface, chunk_pos, rng, cross4)
     local wooden_chest_template = { name = 'wooden-chest', position = { 0, 0 }, force = 'north' }
     local coal_template = { name = 'coal', position = { 0, 0 } }
     local stone_wall_template = { name = 'stone-wall', position = { 0, 0 }, force = 'north' }
@@ -489,14 +537,26 @@ local function generate_starting_area(surface, chunk_pos, rng)
             noise_end = math_min(noise_end, river_start - 1)
         end
 
+        -- The two-team map clips the disc and the ring at the ONE river in front
+        -- of the team (above). The four-square map gives the quadrant a second
+        -- river along the other axis, and that one is a half-line of each ROW,
+        -- not of each column, so it cannot be a bound of these two loops: it is
+        -- a test per cell. Both loops skip it, so neither concrete nor wall nor
+        -- turret ends up in the water the carve pass has taken.
         for y = concrete_start, concrete_end do
-            if get_tile(x, y).collides_with('resource') then
-                concrete_foundation[#concrete_foundation + 1] = { name = DEFAULT_HIDDEN_TILE, position = { x, y } }
+            if not (cross4 and is_side_river_tile(seed, x, y)) then
+                if get_tile(x, y).collides_with('resource') then
+                    concrete_foundation[#concrete_foundation + 1] = { name = DEFAULT_HIDDEN_TILE, position = { x, y } }
+                end
+                concrete[#concrete + 1] = { name = 'refined-concrete', position = { x, y } }
             end
-            concrete[#concrete + 1] = { name = 'refined-concrete', position = { x, y } }
         end
 
         for y = noise_start, noise_end do
+            if cross4 and is_side_river_tile(seed, x, y) then
+                goto continue
+            end
+
             local distance_to_center = tile_distance_to_center(x, y)
             local noise = get_noise(spawn_wall_noise, x, y, seed, 25000) * spawn_wall_noise_multiplier
             local distance_from_spawn_wall = distance_to_center + noise - spawn_wall_radius
@@ -1002,7 +1062,128 @@ function Public.generate(event)
     end
 end
 
-local function draw_spawn_island(surface)
+---The CARVE PASS of the four-square map: the side river of one canonical chunk.
+---
+---`Public.generate` has just produced the chunk exactly as it produces it for the
+---two-team map -- front river, ore, nests, worms and all. This replaces the tiles
+---the SIDE river covers, and only those, by deepwater, takes out whatever was
+---left standing on them (ore, trees, rocks, nests, worms, scrap) and drops the
+---same one-in-64 fish `generate_river` drops. Everything else in the chunk stays
+---what the legacy generator made of it.
+---
+---Never called for the two-team map. One chunk per call, like the generator it
+---follows: the module-level tile buffers are not re-entrant.
+---
+---Its own generator: `Public.generate` did not hand its rng back, and one drawn
+---again from the same chunk position is just as deterministic and just as
+---independent of the order chunks are generated in -- all the fish need.
+---@param event EventData.on_chunk_generated
+function Public.carve_side_river(event)
+    local chunk_pos = event.position
+    if not Public.chunk_has_side_river(chunk_pos) then
+        return
+    end
+
+    local surface = event.surface
+    local seed = surface.map_gen_settings.seed
+    local rng = create_rng_for_chunk(chunk_pos, seed)
+    local create_entity = surface.create_entity
+    local fish_template = { name = 'fish', position = { 0.5, 0.5 } }
+    local left_top_x = chunk_pos.x * 32
+    local left_top_y = chunk_pos.y * 32
+
+    -- Which of the chunk's 1024 cells the river took, so that the sweep below
+    -- can tell an entity standing in the water from one standing on the bank.
+    local carved = {}
+    local tiles = {}
+    local i = 1
+
+    for y = left_top_y, left_top_y + 32 - 1 do
+        for x = left_top_x, left_top_x + 32 - 1 do
+            if is_side_river_tile(seed, x, y) then
+                local tile = preallocated_tiles[next_preallocated_tile]
+                next_preallocated_tile = (next_preallocated_tile % (32 * 32)) + 1
+
+                tile.name = 'deepwater'
+                tile.position[1], tile.position[2] = x, y
+                tiles[i] = tile
+                i = i + 1
+                carved[(x - left_top_x) * 32 + (y - left_top_y) + 1] = true
+                if rng(1, 64) == 1 then
+                    fish_template.position[1], fish_template.position[2] = x + 0.5, y + 0.5
+                    create_entity(fish_template)
+                end
+            end
+        end
+    end
+
+    if i == 1 then
+        return
+    end
+    surface.set_tiles(tiles)
+
+    -- Matched by the cell an entity stands on, so a tree on the bank keeps its
+    -- place and one in the water does not. The fish that were just dropped are
+    -- standing in the water on purpose, and a character is never removed by the
+    -- terrain code.
+    local entities = surface.find_entities_filtered({
+        area = { { left_top_x, left_top_y }, { left_top_x + 32, left_top_y + 32 } },
+        name = { 'character', 'fish' },
+        invert = true,
+    })
+    for _, entity in pairs(entities) do
+        local position = entity.position
+        local cell_x = math_floor(position.x) - left_top_x
+        local cell_y = math_floor(position.y) - left_top_y
+        if cell_x >= 0 and cell_x < 32 and cell_y >= 0 and cell_y < 32 and carved[cell_x * 32 + cell_y + 1] then
+            entity.destroy()
+        end
+    end
+end
+
+local closed_quadrant_water = {}
+for i = 1, 32 * 32 do
+    closed_quadrant_water[i] = { name = 'deepwater', position = { 0, 0 } }
+end
+
+---A chunk of a CLOSED quadrant, filled edge to edge with water.
+---
+---Three teams play the four-square map with the bottom-left quadrant empty: it
+---belongs to nobody, is a copy of nothing and holds no team, nests, ore or silo,
+---so it is water. Characters are left where they are, as
+---everywhere else in the clone machinery -- a spectator flying over it must not
+---be deleted.
+---@param surface LuaSurface
+---@param chunk_pos {x: int, y: int}
+function Public.fill_chunk_with_water(surface, chunk_pos)
+    local left_top_x = chunk_pos.x * 32
+    local left_top_y = chunk_pos.y * 32
+
+    local i = 1
+    for y = left_top_y, left_top_y + 32 - 1 do
+        for x = left_top_x, left_top_x + 32 - 1 do
+            local tile = closed_quadrant_water[i]
+            tile.position[1], tile.position[2] = x, y
+            i = i + 1
+        end
+    end
+    surface.set_tiles(closed_quadrant_water)
+
+    local area = { { left_top_x, left_top_y }, { left_top_x + 32, left_top_y + 32 } }
+    surface.destroy_decoratives({ area = area })
+    local entities = surface.find_entities_filtered({
+        area = area,
+        name = 'character',
+        invert = true,
+    })
+    for _, entity in pairs(entities) do
+        entity.destroy()
+    end
+end
+
+---@param surface LuaSurface
+---@param cross4 boolean|nil four-square map: the canonical quarter and no more
+local function draw_spawn_island(surface, cross4)
     local tiles = {}
     for x = math_floor(spawn_island_size) * -1, -1, 1 do
         for y = math_floor(spawn_island_size) * -1, -1, 1 do
@@ -1021,13 +1202,27 @@ local function draw_spawn_island(surface)
         end
     end
 
-    for i = 1, #tiles, 1 do
-        table_insert(tiles, { name = tiles[i].name, position = { tiles[i].position.x * -1 - 1, tiles[i].position.y } })
+    if not cross4 then
+        -- The two-team map draws the north-west quarter and duplicates it to the
+        -- north-east, the mirror clone bringing the southern half. On the
+        -- four-square map the rotation clones bring the other three quarters, so
+        -- the canonical one is drawn alone.
+        for i = 1, #tiles, 1 do
+            table_insert(
+                tiles,
+                { name = tiles[i].name, position = { tiles[i].position.x * -1 - 1, tiles[i].position.y } }
+            )
+        end
     end
 
     surface.set_tiles(tiles, true)
 
     local island_area = { { -spawn_island_size, -spawn_island_size }, { spawn_island_size, 0 } }
+    if cross4 then
+        -- Only the quarter that was drawn; the other three quadrants are not
+        -- this function's to wipe.
+        island_area = { { -spawn_island_size, -spawn_island_size }, { 0, 0 } }
+    end
     surface.destroy_decoratives({ area = island_area })
     for _, entity in pairs(surface.find_entities(island_area)) do
         entity.destroy()
@@ -1051,22 +1246,63 @@ local function force_spawn_chunks_generation(surface, mirror)
     surface.force_generate_chunk_requests()
 end
 
+--- The spawn chunks of the CANONICAL quadrant of the four-square map: the
+--- quarter of `force_spawn_chunks_generation`'s box with cx < 0 and cy < 0.
+---@param surface LuaSurface
+local function force_canonical_spawn_chunks_generation(surface)
+    local request_to_generate_chunks = surface.request_to_generate_chunks
+    for x = -chunk_r, -1 do
+        for y = -chunk_r, -1 do
+            request_to_generate_chunks({ x * 32, y * 32 }, 0)
+        end
+    end
+    surface.force_generate_chunk_requests()
+end
+
+--- The spawn chunks of the three IMAGE quadrants of the four-square map.
+---
+--- Generating them is what makes the chunk handler clone the canonical quadrant
+--- onto them, so this call is the one that gives every other team its silo, its
+--- spawn wall and its ore -- which is why it comes after the structures are
+--- finished, exactly as the legacy map's second `force_spawn_chunks_generation`
+--- does. A closed quadrant is skipped: it is water, not a copy of anything.
+---@param surface LuaSurface
+local function force_image_spawn_chunks_generation(surface)
+    local request_to_generate_chunks = surface.request_to_generate_chunks
+    for k = 1, 3 do
+        if not Layout.is_closed_quadrant(k) then
+            for x = -chunk_r, -1 do
+                for y = -chunk_r, -1 do
+                    local cx, cy = Layout.rotate_chunk(k, x, y)
+                    request_to_generate_chunks({ cx * 32, cy * 32 }, 0)
+                end
+            end
+        end
+    end
+    surface.force_generate_chunk_requests()
+end
+
 --- Generate some biter nests so attack groups could be spawned
 ---@param surface LuaSurface
-local function request_biters_area_generation(surface)
+---@param cross4 boolean|nil four-square map: the canonical quadrant's rows only
+local function request_biters_area_generation(surface, cross4)
     -- skip biter area border at x=0 chunk and include solid biter area chunk which guaranteed to contain some nests
     local solid_biter_area_start = bb_config_bitera_area_distance + 70 + (32 - 1) * bb_config_biter_area_slope
     local start_row = -1 - math_ceil(solid_biter_area_start / 32)
     local end_row = -chunk_r - 1
+    local end_column = cross4 and -1 or (chunk_r - 1)
     local request_to_generate_chunks = surface.request_to_generate_chunks
-    for x = -chunk_r, chunk_r - 1 do
+    for x = -chunk_r, end_column do
         for y = start_row, end_row do
             request_to_generate_chunks({ x * 32, y * 32 }, 0)
         end
     end
 end
 
-local function draw_spawn_area(surface, rng)
+---@param surface LuaSurface
+---@param rng LuaRandomGenerator
+---@param cross4 boolean|nil four-square map: the canonical quadrant's chunks only
+local function draw_spawn_area(surface, rng, cross4)
     local spawn_wall_area_radius = spawn_wall_radius + spawn_wall_noise_deviation
     local trees = surface.find_entities_filtered({
         type = 'tree',
@@ -1080,9 +1316,14 @@ local function draw_spawn_area(surface, rng)
         tree.destroy()
         -- end
     end
-    for x = -chunk_r, chunk_r - 1 do
+    -- The tree wipe above is a disc around the ORIGIN, not around a team's
+    -- spawn, and so is the ring `generate_starting_area` draws: the four-square
+    -- map needs no new arithmetic for either, only the quarter of the chunks
+    -- that lies in the canonical quadrant.
+    local end_column = cross4 and -1 or (chunk_r - 1)
+    for x = -chunk_r, end_column do
         for y = -chunk_r, -1 do
-            generate_starting_area(surface, { x = x, y = y }, rng)
+            generate_starting_area(surface, { x = x, y = y }, rng, cross4)
         end
     end
 
@@ -1101,6 +1342,28 @@ function Public.draw_water_for_river_ends(surface, chunk_pos)
         water_barrier[x + 1].position[1] = left_top_x + x
     end
     surface.set_tiles(water_barrier)
+end
+
+local vertical_water_barrier = {}
+for i = 1, 32 do
+    vertical_water_barrier[i] = { name = 'deepwater', position = { 0, 0 } }
+end
+
+---The twin of `draw_water_for_river_ends` for the vertical arm of the cross:
+---a one-tile strip of water down the x = 0 column of a chunk the engine has not
+---generated yet, so that the biter pathfinder cannot walk across that river over
+---Factorio's three-chunk tile pre-generation.
+---
+---As in the horizontal template, only one coordinate of each entry is ever
+---written -- here it is the x that stays 0 for good.
+---@param surface LuaSurface
+---@param chunk_pos {x: int, y: int}
+function Public.draw_water_for_vertical_river_ends(surface, chunk_pos)
+    local left_top_y = chunk_pos.y * 32
+    for y = 0, 32 - 1 do
+        vertical_water_barrier[y + 1].position[2] = left_top_y + y
+    end
+    surface.set_tiles(vertical_water_barrier)
 end
 
 local function draw_grid_ore_patch(count, grid, name, surface, size, density, rng)
@@ -1155,7 +1418,10 @@ local function clear_ore_in_main(surface)
     end
 end
 
-local function generate_spawn_ore(surface, rng)
+---@param surface LuaSurface
+---@param rng LuaRandomGenerator
+---@param cross4 boolean|nil four-square map: the canonical quadrant's grid
+local function generate_spawn_ore(surface, rng, cross4)
     -- This array holds indices of chunks onto which we desire to
     -- generate ore patches. It is visually representing north spawn
     -- area. One element was removed on purpose - we don't want to
@@ -1178,6 +1444,29 @@ local function generate_spawn_ore(surface, rng)
         { 2, -1 },
     }
 
+    if cross4 then
+        -- The four-square map draws the canonical quadrant and the rotation
+        -- clones carry it to the others, so the grid moves west of the side
+        -- river: the same three rows, and four columns with cx < 0 instead of
+        -- five across the axis. [-1,-1] is dropped for the reason [0,-1] is
+        -- dropped above -- it is the lake corner. Eleven cells, for the nine
+        -- patches of `tables.spawn_ore`: the six cells of the legacy grid that
+        -- have cx < 0 would run it empty, and `rng(1, 0)` is an error.
+        grid = {
+            { -4, -3 },
+            { -3, -3 },
+            { -2, -3 },
+            { -1, -3 },
+            { -4, -2 },
+            { -3, -2 },
+            { -2, -2 },
+            { -1, -2 },
+            { -4, -1 },
+            { -3, -1 },
+            { -2, -1 },
+        }
+    end
+
     -- Calculate left_top position of a chunk. It will be used as origin
     -- for ore drawing. Reassigns new coordinates to the grid.
     for i, _ in ipairs(grid) do
@@ -1191,27 +1480,53 @@ local function generate_spawn_ore(surface, rng)
     end
 end
 
-local function generate_additional_rocks(surface, rng)
+---@param surface LuaSurface
+---@param rng LuaRandomGenerator
+---@param cross4 boolean|nil four-square map: the canonical quadrant only
+local function generate_additional_rocks(surface, rng, cross4)
     local r = 130
-    if surface.count_entities_filtered({ type = 'simple-entity', area = { { r * -1, r * -1 }, { r, 0 } } }) >= 12 then
+    local counted_area = { { r * -1, r * -1 }, { r, 0 } }
+    if cross4 then
+        counted_area = { { r * -1, r * -1 }, { 0, 0 } }
+    end
+    if surface.count_entities_filtered({ type = 'simple-entity', area = counted_area }) >= 12 then
         return
     end
-    local position = { x = -96 + rng(0, 192), y = -40 - rng(0, 96) }
+    local position
+    if cross4 then
+        -- x gets the shape the legacy gives y, so the cluster sits in the middle
+        -- of the quadrant, clear of both of its rivers.
+        position = { x = -40 - rng(0, 96), y = -40 - rng(0, 96) }
+    else
+        position = { x = -96 + rng(0, 192), y = -40 - rng(0, 96) }
+    end
     for _ = 1, rng(6, 10) do
         local name = rocks[rng(1, 5)]
         local p = surface.find_non_colliding_position(name, {
             position.x + (-10 + rng(0, 20)),
             position.y + (-10 + rng(0, 20)),
         }, 16, 1)
-        if p and p.y < -16 then
+        -- `p.x < -16` is `p.y < -16` for the second river.
+        if p and p.y < -16 and (not cross4 or p.x < -16) then
             surface.create_entity({ name = name, position = p })
         end
     end
 end
 
-local function generate_silo(surface, rng)
-    local pos = { x = -32 + rng(0, 64), y = -72 }
-    local mirror_position = { x = pos.x * -1, y = pos.y * -1 }
+---@param surface LuaSurface
+---@param rng LuaRandomGenerator
+---@param cross4 boolean|nil four-square map: the canonical quadrant only
+local function generate_silo(surface, rng, cross4)
+    local pos
+    if cross4 then
+        -- The canonical quadrant's silo: the legacy's 64-tile spread moved
+        -- wholly to x < 0, and 40 tiles clear of the side river so that neither
+        -- the silo nor the water it replaces below reaches it. One draw, as on
+        -- the legacy map -- the three other silos are this one turned.
+        pos = { x = -40 - rng(0, 64), y = -72 }
+    else
+        pos = { x = -32 + rng(0, 64), y = -72 }
+    end
 
     for _, t in
         pairs(surface.find_tiles_filtered({
@@ -1221,19 +1536,25 @@ local function generate_silo(surface, rng)
     do
         surface.set_tiles({ { name = DEFAULT_HIDDEN_TILE, position = t.position } })
     end
-    for _, t in
-        pairs(surface.find_tiles_filtered({
-            area = {
-                { mirror_position.x - 6, mirror_position.y - 6 },
-                {
-                    mirror_position.x + 6,
-                    mirror_position.y + 6,
+    if not cross4 then
+        -- The two-team map also clears the water where the mirror clone will put
+        -- the southern silo. The four-square map has no such place: the clones
+        -- carry the tiles of the whole chunk, hidden tiles included.
+        local mirror_position = { x = pos.x * -1, y = pos.y * -1 }
+        for _, t in
+            pairs(surface.find_tiles_filtered({
+                area = {
+                    { mirror_position.x - 6, mirror_position.y - 6 },
+                    {
+                        mirror_position.x + 6,
+                        mirror_position.y + 6,
+                    },
                 },
-            },
-            name = { 'water', 'deepwater' },
-        }))
-    do
-        surface.set_tiles({ { name = DEFAULT_HIDDEN_TILE, position = t.position } })
+                name = { 'water', 'deepwater' },
+            }))
+        do
+            surface.set_tiles({ { name = DEFAULT_HIDDEN_TILE, position = t.position } })
+        end
     end
 
     local silo = surface.create_entity({
@@ -1275,6 +1596,43 @@ function Public.generate_initial_structures(surface)
     request_biters_area_generation(surface)
 end
 
+---The one-shot structures of the FOUR-SQUARE map: the canonical quadrant, and
+---then the clones.
+---
+---`Public.generate_initial_structures` draws the whole north half and lets the
+---mirror clone carry it south. This draws the top-left quarter and lets the
+---rotation clones carry it into the other quadrants, so every team's base is the
+---same base turned -- by construction, not by a second generation.
+---
+---The order is the legacy one, step for step, and for the legacy reasons:
+---
+---  1. the canonical spawn chunks exist before anything is drawn on them;
+---  2. ONE rng for the whole pass, drawn from the very same `{1, 1}` chunk, so a
+---     seed still means one thing;
+---  3. spawn area, 4. ore, 5. rocks, 6. silo, 7. island -- each restricted to
+---     the canonical quadrant and clipped by BOTH of its rivers;
+---  8. and only THEN the image spawn chunks, because generating them is what
+---     triggers the clones and the clones must copy the finished structures.
+---     This is how the legacy map gets its silo into the south.
+---  9. the biter rows are requested last, asynchronously, as on the legacy map.
+---@param surface LuaSurface
+function Public.generate_initial_structures_cross4(surface)
+    force_canonical_spawn_chunks_generation(surface)
+    local rng = create_rng_for_chunk({ x = 1, y = 1 }, surface.map_gen_settings.seed)
+    draw_spawn_area(surface, rng, true)
+    if not storage.active_special_games['mixed_ore_map'] then
+        -- Not restricted: the box reaches into the three other quadrants, where
+        -- not one chunk exists yet, so there is nothing of theirs to clear.
+        clear_ore_in_main(surface)
+        generate_spawn_ore(surface, rng, true)
+    end
+    generate_additional_rocks(surface, rng, true)
+    generate_silo(surface, rng, true)
+    draw_spawn_island(surface, true)
+    force_image_spawn_chunks_generation(surface)
+    request_biters_area_generation(surface, true)
+end
+
 ---@param entity LuaEntity
 ---@param player LuaPlayer
 function Public.minable_wrecks(entity, player)
@@ -1314,15 +1672,51 @@ function Public.minable_wrecks(entity, player)
 end
 
 --Landfill Restriction
+
+---True for a TILE of the four-square map that no landfill may cover: the water
+---of the cross.
+---
+---Every quadrant is the canonical one turned, so the question is asked in the
+---canonical frame: the tile is unrotated by the quarter turns of its own
+---quadrant (`unrotate_tile`, the cell transform the clone pipeline turns the
+---terrain with -- not `unrotate_position`, which would answer for the tile next
+---door on the axis that gets negated) and then handed to the two river
+---predicates above. The front river covers the central lake, which is
+---the same disc in every frame (`tile_distance_to_center` is invariant under the
+---cell turn), so the spectator island stays landfill-proof exactly as it is
+---today.
+---
+---A closed quadrant -- the fourth one of a three-team round -- is water from end
+---to end and takes no landfill at all.
+---@param seed uint
+---@param x number tile x
+---@param y number tile y
+---@return boolean
+function Public.is_cross4_river_tile(seed, x, y)
+    local k = Layout.quadrant_of_tile(x, y)
+    if Layout.is_closed_quadrant(k) then
+        return true
+    end
+    local cx, cy = Layout.unrotate_tile(k, x, y)
+    return is_horizontal_border_river(cx, cy, seed) or is_side_river_tile(seed, cx, cy)
+end
+
 function Public.restrict_landfill(surface, user, tiles)
     local seed = game.surfaces[storage.bb_surface_name].map_gen_settings.seed
+    local cross4 = Teams.layout() == 'cross4'
     for _, t in pairs(tiles) do
-        local check_position = t.position
-        if check_position.y > 0 then
-            check_position = { x = check_position.x, y = (check_position.y * -1) - 1 }
+        local is_river
+        if cross4 then
+            is_river = Public.is_cross4_river_tile(seed, t.position.x, t.position.y)
+        else
+            local check_position = t.position
+            if check_position.y > 0 then
+                check_position = { x = check_position.x, y = (check_position.y * -1) - 1 }
+            end
+            is_river = is_horizontal_border_river(check_position.x, check_position.y, seed)
         end
         local trusted = session.get_trusted_table()
-        if is_horizontal_border_river(check_position.x, check_position.y, seed) then
+        if is_river then
             surface.set_tiles({ { name = t.old_tile.name, position = t.position } }, true)
             if user ~= nil then
                 user.print('You can not landfill the river', { color = { r = 0.22, g = 0.99, b = 0.99 } })
@@ -1357,14 +1751,99 @@ local robot_build_restriction = {
     end,
 }
 
+---The two rules of the four-square map for robots, ghosts and deconstruction
+---orders: today's two-team BANDS, turned into every square. With `h` half a
+---river width and `(cx, cy)` the position in the team's canonical frame (its own
+---square is `x < 0, y < 0`, its two rivers run along the axes):
+---
+---  * building is allowed only inside the team's own square AND more than `h`
+---    from both axes (`cx < -h and cy < -h`): the last `h` tiles of both banks,
+---    both rivers and the spectator island are denied, exactly as today's
+---    `y >= -h` denies them to north;
+---  * deconstruction is denied past `h` tiles beyond either axis
+---    (`cx > h or cy > h`): a team may order it over its rivers and `h` tiles up
+---    the neighbours' banks, exactly as today's `y > h` lets north reach across.
+---
+---A force that is not an active team -- the spectators, the biters, `player`,
+---and a team of the roster that sits this round out -- is not restricted at all,
+---exactly as a force absent from `robot_build_restriction` is not restricted
+---today. The closed square of a three-team round belongs to nobody
+---(`Layout.of_position` is nil there), so nobody builds in it.
+---@param force_name string
+---@param position MapPosition
+---@return boolean
+local function cross_build_denied(force_name, position)
+    if not Teams.is_active(force_name) then
+        return false
+    end
+    if Layout.of_position(position) ~= force_name then
+        return true
+    end
+    local half_river_width = bb_config.border_river_width / 2
+    local cx, cy = Layout.to_canonical(force_name, position.x, position.y)
+    return cx >= -half_river_width or cy >= -half_river_width
+end
+
+---@param force_name string
+---@param position MapPosition
+---@return boolean
+local function cross_deconstruction_denied(force_name, position)
+    if not Teams.is_active(force_name) then
+        return false
+    end
+    local half_river_width = bb_config.border_river_width / 2
+    local cx, cy = Layout.to_canonical(force_name, position.x, position.y)
+    return cx > half_river_width or cy > half_river_width
+end
+
+---True when `force_name`'s construction robots may not build, and its players
+---may not leave a ghost, at `position`.
+---
+---'horizontal2': the table above, verbatim -- a team is stopped from half a
+---river width BEFORE the river onwards, i.e. it may not build on its own bank.
+---'cross4': the same band along both of its rivers, inside its own square.
+---@param force_name string
+---@param position MapPosition
+---@return boolean
+function Public.build_denied(force_name, position)
+    if Teams.layout() == 'cross4' then
+        return cross_build_denied(force_name, position)
+    end
+    local restriction = robot_build_restriction[force_name]
+    if not restriction then
+        return false
+    end
+    return restriction(position.y) == true
+end
+
+---True when `force_name`'s deconstruction order at `position` is cancelled
+---(`main.lua`'s `on_marked_for_deconstruction`, which is why the expression
+---lives next to its twin).
+---
+---'horizontal2': today's expression, which is NOT the build rule above. The
+---build rule stops a team half a river width BEFORE the river; this one only
+---stops it half a river width PAST it, so a team may order deconstruction all
+---over the river and a little way up the enemy bank. The two sites disagree
+---about which side `y == 0` belongs to and that disagreement is today's
+---behaviour (INVENTORY §1), so both are kept exactly as they are.
+---'cross4': the same reach, half a river width past either of its two axes.
+---@param force_name string
+---@param position MapPosition
+---@return boolean
+function Public.deconstruction_denied(force_name, position)
+    if Teams.layout() == 'cross4' then
+        return cross_deconstruction_denied(force_name, position)
+    end
+    local half_river_width = bb_config.border_river_width / 2
+    return (force_name == 'north' and position.y > half_river_width)
+        or (force_name == 'south' and position.y < -half_river_width)
+end
+
 function Public.deny_construction_bots(event)
     if not event.entity.valid then
         return
     end
-    if not robot_build_restriction[event.robot.force.name] then
-        return
-    end
-    if not robot_build_restriction[event.robot.force.name](event.entity.position.y) then
+    if not Public.build_denied(event.robot.force.name, event.entity.position) then
         return
     end
     local inventory = event.robot.get_inventory(defines.inventory.robot_cargo)
@@ -1385,10 +1864,7 @@ function Public.deny_enemy_side_ghosts(event)
     if e.type == 'entity-ghost' or e.type == 'tile-ghost' then
         local player = game.get_player(event.player_index)
         local force = player.force.name
-        if not robot_build_restriction[force] then
-            return
-        end
-        if not robot_build_restriction[force](event.entity.position.y) then
+        if not Public.build_denied(force, event.entity.position) then
             return
         end
 

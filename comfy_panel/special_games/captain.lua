@@ -3,6 +3,7 @@ local CaptainTaskGroup = require('comfy_panel.special_games.captain_task_group')
 local CaptainUtils = require('comfy_panel.special_games.captain_utils')
 local CaptainUI = require('comfy_panel.special_games.captain_ui')
 local CaptainStates = require('comfy_panel.special_games.captain_states')
+local CaptainTeams = require('comfy_panel.special_games.captain_teams')
 local ClosableFrame = require('utils.ui.closable_frame')
 local Color = require('utils.color_presets')
 local ComfyPanelGroup = require('comfy_panel.group')
@@ -16,6 +17,7 @@ local Session = require('utils.datastore.session_data')
 local Tables = require('maps.biter_battles_v2.tables')
 local Task = require('utils.task')
 local TeamManager = require('maps.biter_battles_v2.team_manager')
+local Teams = require('maps.biter_battles_v2.teams')
 local Token = require('utils.token')
 local safe_wrap_cmd = require('utils.utils').safe_wrap_cmd
 
@@ -34,6 +36,7 @@ local string_sub = string.sub
 
 local Public = {
     name = { type = 'label', caption = 'Captain event', tooltip = 'Captain event' },
+    max_teams = 2,
     config = {
         { name = 'label4', type = 'label', caption = 'Referee' },
         { name = 'refereeName', type = 'textfield', text = '', numeric = false, width = 140 },
@@ -174,6 +177,9 @@ local function cleanup_research_permissions()
 end
 
 local function captain_to_team(special, name)
+    if Teams.count() > 2 then
+        return CaptainTeams.captain_team(special.captainList, special.viceCaptains, Teams.all(), name)
+    end
     if special.captainList[1] == name or special.viceCaptains.north[name] then
         return 'north'
     elseif special.captainList[2] == name or special.viceCaptains.south[name] then
@@ -320,6 +326,11 @@ local function force_end_captain_event(player)
     storage.active_special_games.captain_mode = false
     storage.bb_threat.north_biters = 0
     storage.bb_threat.south_biters = 0
+    if Teams.count() > 2 then
+        for _, team in ipairs(Teams.all()) do
+            storage.bb_threat[Teams.biter_force(team)] = 0
+        end
+    end
     clear_captain_rendering()
     clear_gui_captain_mode()
     for _, pl in pairs(game.connected_players) do
@@ -393,6 +404,17 @@ end
 ---@return LuaPlayer, LuaPlayer
 local function get_captain_picking_pair(next_force)
     local special = storage.special_games_variables.captain_mode
+    if Teams.count() > 2 then
+        -- N captains: the one who picks, then every other captain (idle).
+        local teams = Teams.all()
+        local others = {}
+        for i, team in ipairs(teams) do
+            if team ~= next_force then
+                others[#others + 1] = cpt_get_player(special.captainList[i])
+            end
+        end
+        return cpt_get_player(special.captainList[CaptainTeams.captain_index(teams, next_force)]), others
+    end
     local next_cpt = special.captainList[next_force == 'north' and 1 or 2]
     local prev_cpt = special.captainList[next_force ~= 'north' and 1 or 2]
 
@@ -421,6 +443,22 @@ local function display_picking_ui(state)
         CaptainUI.update_picking_ui_title(cpt_next, running_or_paused)
         CaptainUI.update_picking_ui_pick_buttons(cpt_next, running_or_paused)
         CaptainUI.update_picking_ui_timer(cpt_next)
+    elseif Teams.count() > 2 then
+        local cpt_next, others = get_captain_picking_pair(force)
+        CaptainUI.draw_picking_ui(cpt_next)
+        CaptainUI.update_picking_ui_title(cpt_next, running_or_paused)
+        CaptainUI.update_picking_ui_pick_buttons(cpt_next, running_or_paused)
+        CaptainUI.update_picking_ui_timer(cpt_next)
+        for _, cpt in ipairs(others) do
+            if #special.listPlayers > 1 then
+                CaptainUI.draw_picking_ui(cpt)
+                CaptainUI.update_picking_ui_pick_buttons(cpt, idle_or_paused)
+                CaptainUI.update_picking_ui_title(cpt, idle_or_paused)
+                CaptainUI.update_picking_ui_timer(cpt)
+            else
+                CaptainUI.try_destroy_picking_ui(cpt)
+            end
+        end
     else
         local cpt_next, cpt_prev = get_captain_picking_pair(force)
         CaptainUI.draw_picking_ui(cpt_next)
@@ -630,6 +668,9 @@ end
 ---@return boolean
 local function is_player_a_captain(player)
     local special = storage.special_games_variables.captain_mode
+    if Teams.count() > 2 then
+        return CaptainTeams.is_captain(special.captainList, Teams.count(), player)
+    end
     return special.captainList[1] == player or special.captainList[2] == player
 end
 
@@ -638,6 +679,13 @@ end
 local function player_has_captain_authority(player)
     local special = storage.special_games_variables.captain_mode
     local force_name = storage.chosen_team[player]
+    if Teams.count() > 2 then
+        if not Teams.is_active(force_name) then
+            return false
+        end
+        return CaptainTeams.is_captain(special.captainList, Teams.count(), player)
+            or special.viceCaptains[force_name][player] == true
+    end
     if force_name ~= 'north' and force_name ~= 'south' then
         return false
     end
@@ -765,6 +813,28 @@ local function generate_captain_mode(refereeName, autoTrust, captainKick, specia
         special.groupsOrganization.north[i] = { name = 'Group ' .. i, players = {}, player_order = {} }
         special.groupsOrganization.south[i] = { name = 'Group ' .. i, players = {}, player_order = {} }
     end
+    if Teams.count() > 2 then
+        -- The per-team tables above are the legacy pair's; the other teams of
+        -- the round get the same entries (a two-team game never has them).
+        for _, team in ipairs(Teams.all()) do
+            if team ~= 'north' and team ~= 'south' then
+                special.captain_pick_timer_sma_samples[team] = {}
+                special.captain_pick_timer_sma_count[team] = 0
+                special.captain_pick_timer_sma_sum[team] = 0
+                special.captain_pick_timer_sma_last_tick[team] = 0
+                special.viceCaptains[team] = {}
+                special.nextAutoPicksFavor[team] = 0
+                special[team .. 'EnabledScienceThrow'] = true
+                special[team .. 'ThrowPlayersListAllowed'] = {}
+                special.researchPermissions[team] = { locked = false, trustlist = {} }
+                special.stats[team .. 'Picks'] = {}
+                special.groupsOrganization[team] = {}
+                for i = 1, CaptainTaskGroup.get_max_num_organization_groups() do
+                    special.groupsOrganization[team][i] = { name = 'Group ' .. i, players = {}, player_order = {} }
+                end
+            end
+        end
+    end
     local referee = nil
     if not is_it_automatic_captain() then
         referee = cpt_get_player(special.refereeName)
@@ -788,6 +858,11 @@ local function generate_captain_mode(refereeName, autoTrust, captainKick, specia
 
     storage.bb_threat.north_biters = -1e12
     storage.bb_threat.south_biters = -1e12
+    if Teams.count() > 2 then
+        for _, team in ipairs(Teams.all()) do
+            storage.bb_threat[Teams.biter_force(team)] = -1e12
+        end
+    end
     clear_gui_captain_mode()
 
     for _, player in pairs(game.connected_players) do
@@ -881,6 +956,8 @@ function Public.get_captain_candidates(force_name, allow_everyone)
     local picks = special.stats.southPicks
     if force_name == 'north' then
         picks = special.stats.northPicks
+    elseif Teams.count() > 2 then
+        picks = special.stats[force_name .. 'Picks'] or {}
     end
 
     local connected_players = {}
@@ -964,6 +1041,9 @@ function Public.get_player_to_make_pick(force_name)
     -- If the force has a captain, choose them, otherwise choose a random one from captain_candidate
     local special = storage.special_games_variables.captain_mode
     local captain = special.captainList[force_name == 'north' and 1 or 2]
+    if Teams.count() > 2 then
+        captain = special.captainList[CaptainTeams.captain_index(Teams.all(), force_name) or 0]
+    end
     if captain then
         return cpt_get_player(captain)
     end
@@ -1015,7 +1095,10 @@ end
 local function delete_player_from_playersList(playerName, isNorthPlayerBoolean)
     local special = storage.special_games_variables.captain_mode
     local tableChosen = special.stats.southPicks
-    if isNorthPlayerBoolean then
+    if Teams.count() > 2 then
+        -- the caller passes the force name
+        tableChosen = special.stats[tostring(isNorthPlayerBoolean) .. 'Picks'] or {}
+    elseif isNorthPlayerBoolean then
         tableChosen = special.stats.northPicks
     end
     table_remove_element(tableChosen, playerName)
@@ -1031,6 +1114,14 @@ local function generate_vs_text_rendering()
     end
 
     local special = storage.special_games_variables.captain_mode
+    if Teams.count() > 2 then
+        local text = CaptainTeams.vs_text(special.captainList, Teams.all())
+            .. '. Referee: '
+            .. special.refereeName
+            .. '. Teams on Voice Chat'
+        render_text('captainLineVersus', text, { 0, 10 }, Color.captain_versus_float, 1.5, 'heading-1')
+        return
+    end
     local text = string_format(
         '%s vs %s. Referee: %s. Teams on Voice Chat',
         ternary(special.captainList[1], 'Team ' .. tostring(special.captainList[1]) .. ' (North)', 'Team North'),
@@ -1059,6 +1150,12 @@ local function start_captain_event()
     special.stats.tickGameStarting = game.tick
     special.stats.NorthInitialCaptain = special.captainList[1]
     special.stats.SouthInitialCaptain = special.captainList[2]
+    if Teams.count() > 2 then
+        special.stats.initialCaptains = {}
+        for i, team in ipairs(Teams.all()) do
+            special.stats.initialCaptains[team] = special.captainList[i]
+        end
+    end
     special.stats.InitialReferee = special.refereeName
     local difficulty = DifficultyVote.difficulty_name()
     if 'difficulty' == "I'm Too Young to Die" then
@@ -1071,6 +1168,11 @@ local function start_captain_event()
     special.stats.extrainfo = difficulty
     storage.bb_threat.north_biters = 0
     storage.bb_threat.south_biters = 0
+    if Teams.count() > 2 then
+        for _, team in ipairs(Teams.all()) do
+            storage.bb_threat[Teams.biter_force(team)] = 0
+        end
+    end
 
     clear_captain_rendering()
     render_text(
@@ -1093,7 +1195,11 @@ local function start_captain_event()
     )
 
     for _, player in pairs(game.connected_players) do
-        if player.force.name == 'north' or player.force.name == 'south' then
+        if
+            player.force.name == 'north'
+            or player.force.name == 'south'
+            or (Teams.count() > 2 and Teams.is_active(player.force.name))
+        then
             special.stats.playerSessionStartTimes[player.name] = Functions.get_ticks_since_game_start()
         end
     end
@@ -1124,7 +1230,14 @@ end)
 
 local function prepare_start_captain_event()
     local special = storage.special_games_variables.captain_mode
-    special.listTeamReadyToPlay = { 'north', 'south' }
+    if Teams.count() > 2 then
+        special.listTeamReadyToPlay = {}
+        for i, team in ipairs(Teams.all()) do
+            special.listTeamReadyToPlay[i] = team
+        end
+    else
+        special.listTeamReadyToPlay = { 'north', 'south' }
+    end
     Public.update_all_captain_player_guis()
 
     Task.set_timeout_in_ticks(60, countdown_captain_start_token)
@@ -1147,7 +1260,9 @@ end
 local function captain_log_start_time_player(player)
     if
         storage.special_games_variables.captain_mode ~= nil
-        and (player.force.name == 'south' or player.force.name == 'north')
+        and (player.force.name == 'south' or player.force.name == 'north' or (Teams.count() > 2 and Teams.is_active(
+            player.force.name
+        )))
         and not storage.special_games_variables.captain_mode.prepaPhase
     then
         if not storage.special_games_variables.captain_mode.stats.playerSessionStartTimes[player.name] then
@@ -1244,7 +1359,7 @@ decrement_timer_captain_prepa_token = Token.register(function()
     if storage.automatic_captain_prepa_time_remaining_for_start > 0 then
         Task.set_timeout_in_ticks(60, decrement_timer_captain_prepa_token)
     else
-        if #special.listTeamReadyToPlay < 2 then
+        if #special.listTeamReadyToPlay < Teams.count() then
             game.print('[font=default-large-bold]Game was automatically started[/font]', { color = Color.cyan })
             prepare_start_captain_event()
             Public.update_all_captain_player_guis()
@@ -1301,11 +1416,16 @@ local function start_picking_phase()
     end
 
     -- Allocate initial time budget for picks.
-    for _, f in ipairs({ 'north', 'south' }) do
+    for _, f in ipairs(Teams.all()) do
         special.captain_pick_timer[f] = special.captain_pick_timer_base
     end
     special.captain_pick_timer_last_update = game.tick
 
+    if special.communityPickingMode and is_initial_picking_phase and Teams.count() > 2 then
+        game.print('Community picking is not available above two teams', { color = Color.red })
+        force_end_captain_event()
+        return
+    end
     if special.communityPickingMode and is_initial_picking_phase then
         -- Take only the picks that were "confirmed"
         local final_community_picks = {}
@@ -1362,14 +1482,47 @@ local function start_picking_phase()
         special.pickingPhase = true
         local next_pick_force
         local favor = special.nextAutoPicksFavor
-        for _, force in ipairs({ 'north', 'south' }) do
-            if favor[force] > 0 then
-                favor[force] = favor[force] - 1
-                next_pick_force = force
-                break
+        if Teams.count() > 2 then
+            -- N captains: a snake over the ring, from a random team. A later
+            -- phase (players who joined after the draft) goes to the smallest team.
+            local teams = Teams.all()
+            for _, force in ipairs(teams) do
+                if favor[force] > 0 then
+                    favor[force] = favor[force] - 1
+                    next_pick_force = force
+                    break
+                end
+            end
+            local counts = {}
+            for _, team in ipairs(teams) do
+                counts[team] = #special.stats[team .. 'Picks']
+            end
+            if is_initial_picking_phase then
+                -- no team goes above ceil(T/N) through a group pick
+                local total = #special.listPlayers
+                for _, team in ipairs(teams) do
+                    total = total + counts[team]
+                end
+                special.teamPickCap = math.ceil(total / #teams)
+                local start = next_pick_force and CaptainTeams.captain_index(teams, next_pick_force)
+                    or math_random(#teams)
+                special.pickSnake = CaptainTeams.new_snake(CaptainTeams.rotate(teams, start - 1))
+                next_pick_force = CaptainTeams.snake_next(special.pickSnake, counts)
+            elseif next_pick_force == nil then
+                next_pick_force = CaptainTeams.fewest(teams, counts)
+            end
+            log('Next force to pick: ' .. next_pick_force)
+        end
+        if Teams.count() == 2 then
+            for _, force in ipairs({ 'north', 'south' }) do
+                if favor[force] > 0 then
+                    favor[force] = favor[force] - 1
+                    next_pick_force = force
+                    break
+                end
             end
         end
-        if next_pick_force == nil then
+        if next_pick_force == nil and Teams.count() == 2 then
             local counts = { north = 0, south = 0 }
             for _, player in pairs(game.connected_players) do
                 local force = player.force.name
@@ -1394,6 +1547,24 @@ end
 local function prepare_for_captain()
     local special = storage.special_games_variables.captain_mode
 
+    if Teams.count() > 2 then
+        local teams = Teams.all()
+        local shuffled = CaptainTeams.shuffle({ table.unpack(special.captainList, 1, #teams) }, math_random)
+        special.captainList = shuffled
+        for index, force_name in ipairs(teams) do
+            local captainName = special.captainList[index]
+            add_to_trust(captainName)
+            switch_team_of_player(captainName, force_name)
+            table_remove_element(special.listPlayers, captainName)
+        end
+        if is_it_automatic_captain() then
+            game.print(
+                '[font=default-large-bold]Beware that captains are not allowed to leave before the first picking phase is over and the preparation is over, they must stay online at least until the game starts, otherwise the event will be automatically canceled[/font]',
+                { color = Color.cyan }
+            )
+        end
+        return
+    end
     -- randomize captain forces, otherwise it's too deterministic
     -- for example, first volunteer/most playtime player always end up on north
     if math_random(2) == 1 then
@@ -1417,9 +1588,9 @@ end
 
 local function check_if_right_number_of_captains()
     local special = storage.special_games_variables.captain_mode
-    if #special.captainList < 2 then
+    if #special.captainList < Teams.count() then
         return false
-    elseif #special.captainList == 2 then
+    elseif #special.captainList == Teams.count() then
         prepare_for_captain()
         return true
     else
@@ -1446,6 +1617,10 @@ end
 function Public.change_captain(player, force, decider)
     local special = storage.special_games_variables.captain_mode
     local captain_index = force == 'north' and 1 or 2
+    local n_teams = Teams.count() > 2
+    if n_teams then
+        captain_index = CaptainTeams.captain_index(Teams.all(), force)
+    end
     local decider_text = ''
     if decider then
         decider_text = '[color=blue]' .. decider .. '[/color] has decided that '
@@ -1464,7 +1639,15 @@ function Public.change_captain(player, force, decider)
     end
     if player then
         special.captainList[captain_index] = player.name
-        if force == 'north' then
+        if n_teams then
+            special.stats.initialCaptains = special.stats.initialCaptains or {}
+            special.stats.initialCaptains[force] = special.stats.initialCaptains[force] or player.name
+            if force == 'north' and not special.stats.NorthInitialCaptain then
+                special.stats.NorthInitialCaptain = player.name
+            elseif force == 'south' and not special.stats.SouthInitialCaptain then
+                special.stats.SouthInitialCaptain = player.name
+            end
+        elseif force == 'north' then
             if not special.stats.NorthInitialCaptain then
                 special.stats.NorthInitialCaptain = player.name
             end
@@ -1477,7 +1660,9 @@ function Public.change_captain(player, force, decider)
         Public.draw_captain_manager_gui(player)
     else
         special.captainList[captain_index] = nil
-        if force == 'north' then
+        if n_teams then
+            special[force .. 'EnabledScienceThrow'] = true
+        elseif force == 'north' then
             special.northEnabledScienceThrow = true
         else
             special.southEnabledScienceThrow = true
@@ -1677,10 +1862,50 @@ local function on_gui_selection_state_changed(event)
     end
 end
 
+---How many players picking `playerName` moves into a team (the player and the
+---group members auto_pick_all_of_group would take along).
+---@param playerName string
+---@return integer
+local function pick_size(playerName)
+    local special = storage.special_games_variables.captain_mode
+    if not is_player_in_group_system(playerName) or special.initialPickingPhaseFinished then
+        return 1
+    end
+    local picked = cpt_get_player(playerName)
+    local size = 1
+    for _, name in ipairs(special.listPlayers) do
+        local p = cpt_get_player(name)
+        if
+            name ~= playerName
+            and p
+            and storage.chosen_team[name] == nil
+            and p.tag == picked.tag
+            and p.force.name == 'spectator'
+            and size < special.groupLimit
+        then
+            size = size + 1
+        end
+    end
+    return size
+end
+
+---N>2 only: would picking `playerName` push `force` above the cap?
+---@param playerName string
+---@param force string
+---@return boolean
+local function pick_exceeds_cap(playerName, force)
+    local special = storage.special_games_variables.captain_mode
+    if Teams.count() <= 2 or not special.teamPickCap or special.initialPickingPhaseFinished then
+        return false
+    end
+    return #special.stats[force .. 'Picks'] + pick_size(playerName) > special.teamPickCap
+end
+
 ---Assigns player to force which is currently making a pick. It handles
 ---entire logic concerning picking order and ending the pick phase.
 ---@param player string Name of a player that is supposed to be assigned.
-local function assign_player(player)
+---@param solo boolean? N>2 only: the group does not come along (it would exceed the team cap)
+local function assign_player(player, solo)
     local special = storage.special_games_variables.captain_mode
     local f = special.next_pick_force
     local listPlayers = special.listPlayers
@@ -1697,7 +1922,7 @@ local function assign_player(player)
     CaptainUtils.update_pick_sma(f)
     CaptainUI.try_destroy_picking_ui_list_entry_for_each(special.captainList, player)
 
-    if is_player_in_group_system(player) then
+    if is_player_in_group_system(player) and not solo then
         auto_pick_all_of_group(player)
     end
 
@@ -1705,7 +1930,18 @@ local function assign_player(player)
         Public.end_of_picking_phase()
     else
         local fnext
-        if not special.initialPickingPhaseFinished then
+        if Teams.count() > 2 then
+            local teams = Teams.all()
+            local counts = {}
+            for _, team in ipairs(teams) do
+                counts[team] = #special.stats[team .. 'Picks']
+            end
+            if not special.initialPickingPhaseFinished and special.pickSnake then
+                fnext = CaptainTeams.snake_next(special.pickSnake, counts)
+            else
+                fnext = CaptainTeams.fewest(teams, counts)
+            end
+        elseif not special.initialPickingPhaseFinished then
             -- The logic below defaults to a 1-2-2-2-2-... picking system. However, if large groups
             -- are picked, then whatever captain is picking gets to keep picking until they have more
             -- players than the other team, so if there is one group of 3 that is picked first, then
@@ -1739,6 +1975,26 @@ end
 local function force_assign_player()
     local special = storage.special_games_variables.captain_mode
     local player = special.listPlayers[1]
+    if Teams.count() > 2 and pick_exceeds_cap(player, special.next_pick_force) then
+        -- the first player whose group fits, else the first player alone
+        local fits
+        for _, name in ipairs(special.listPlayers) do
+            if not pick_exceeds_cap(name, special.next_pick_force) then
+                fits = name
+                break
+            end
+        end
+        if fits then
+            player = fits
+        else
+            game.print(
+                player .. ' was picked without their group, which would exceed the team size',
+                { color = Color.red }
+            )
+            assign_player(player, true)
+            return
+        end
+    end
     assign_player(player)
 end
 
@@ -1869,6 +2125,27 @@ local function on_gui_click(event)
         end
     elseif starts_with(name, 'captain_player_picked_') then
         local playerPicked = element.tags.name
+        if Teams.count() > 2 then
+            -- only the captain (or vice) of the team whose turn it is,
+            -- only a player still in the list, only while picking
+            local f = special.next_pick_force
+            if
+                not special.pickingPhase
+                or storage.chosen_team[player.name] ~= f
+                or not player_has_captain_authority(player.name)
+                or not table_contains(special.listPlayers, playerPicked)
+            then
+                player.print('It is not your turn to pick', { color = Color.red })
+                return
+            end
+            if pick_exceeds_cap(playerPicked, f) then
+                player.print(
+                    'This group would put your team above ' .. special.teamPickCap .. ' players, pick someone else',
+                    { color = Color.red }
+                )
+                return
+            end
+        end
         game.print(
             string_format(
                 '%s was picked by%s %s',
@@ -1885,13 +2162,13 @@ local function on_gui_click(event)
                 { color = Color.cyan }
             )
             insert(special.listTeamReadyToPlay, player.force.name)
-            if #special.listTeamReadyToPlay >= 2 then
+            if #special.listTeamReadyToPlay >= Teams.count() then
                 prepare_start_captain_event()
             end
         end
         Public.update_all_captain_player_guis()
     elseif name == 'captain_force_captains_ready' then
-        if #special.listTeamReadyToPlay < 2 then
+        if #special.listTeamReadyToPlay < Teams.count() then
             game.print(
                 '[font=default-large-bold]Referee ' .. player.name .. ' force started the game ![/font]',
                 { color = Color.cyan }
@@ -1900,7 +2177,18 @@ local function on_gui_click(event)
             Public.update_all_captain_player_guis()
         end
     elseif name == 'captain_toggle_throw_science' then
-        if special.captainList[1] == player.name then
+        local n_team = Teams.count() > 2
+            and CaptainTeams.captain_team(special.captainList, {}, Teams.all(), player.name)
+        if n_team then
+            local key = n_team .. 'EnabledScienceThrow'
+            special[key] = not special[key]
+            game.forces[n_team].print(
+                'Can anyone throw science in your team ? ' .. tostring(special[key]),
+                { color = Color.yellow }
+            )
+        elseif Teams.count() > 2 then
+            -- not a captain: nothing to toggle
+        elseif special.captainList[1] == player.name then
             special.northEnabledScienceThrow = not special.northEnabledScienceThrow
             game.forces.north.print(
                 'Can anyone throw science in your team ? ' .. tostring(special.northEnabledScienceThrow),
@@ -1929,7 +2217,11 @@ local function on_gui_click(event)
         Public.toggle_captain_tournament_button(player)
     elseif name == 'captain_replace_captain' then
         local frame = Public.get_active_tournament_frame(player, 'captain_manager_gui')
-        if special.captainList[player.force.name == 'north' and 1 or 2] == player.name then
+        local own_index = player.force.name == 'north' and 1 or 2
+        if Teams.count() > 2 then
+            own_index = CaptainTeams.captain_index(Teams.all(), player.force.name) or 0
+        end
+        if special.captainList[own_index] == player.name then
             local newCaptainPlayerName =
                 get_dropdown_value(frame.captain_manager_replace_captain_table.captain_replace_captain_playerlist)
             local newCaptain = cpt_get_player(newCaptainPlayerName)
@@ -1952,7 +2244,14 @@ local function on_gui_click(event)
         if selected and selected ~= '' and selected ~= 'Select Player' then
             local trustlist = special.northThrowPlayersListAllowed
             local team = 'north'
-            if player.name == special.captainList[2] then
+            if Teams.count() > 2 then
+                team = CaptainTeams.captain_team(special.captainList, {}, Teams.all(), player.name)
+                if not team then
+                    player.print('You are not a captain', { color = Color.red })
+                    return
+                end
+                trustlist = special[team .. 'ThrowPlayersListAllowed']
+            elseif player.name == special.captainList[2] then
                 trustlist = special.southThrowPlayersListAllowed
                 team = 'south'
             elseif player.name ~= special.captainList[1] then
@@ -1978,7 +2277,14 @@ local function on_gui_click(event)
         if selected and selected ~= '' and selected ~= 'Select Player' then
             local trustlist = special.northThrowPlayersListAllowed
             local team = 'north'
-            if player.name == special.captainList[2] then
+            if Teams.count() > 2 then
+                team = CaptainTeams.captain_team(special.captainList, {}, Teams.all(), player.name)
+                if not team then
+                    player.print('You are not a captain', { color = Color.red })
+                    return
+                end
+                trustlist = special[team .. 'ThrowPlayersListAllowed']
+            elseif player.name == special.captainList[2] then
                 trustlist = special.southThrowPlayersListAllowed
                 team = 'south'
             elseif player.name ~= special.captainList[1] then
@@ -2230,9 +2536,29 @@ local function on_player_left_game(event)
             )
             force_end_captain_event()
             return
+        elseif Teams.count() > 2 and special.pickingPhase then
+            -- a replacement from the team, else the event is abandoned
+            -- (never a snake waiting for a captain who is gone)
+            local forceOfCaptain = CaptainTeams.captain_team(special.captainList, {}, Teams.all(), player.name)
+            local playerChosen = forceOfCaptain and Public.get_captain_candidates(forceOfCaptain, false)[1]
+            if playerChosen ~= nil then
+                CaptainUI.try_destroy_picking_ui(player)
+                Public.change_captain(playerChosen, forceOfCaptain, 'New captain automatic selection')
+                display_picking_ui(CaptainStates.PICKS.RUNNING)
+            else
+                game.print(
+                    '[font=default-large-bold]The captain '
+                        .. player.name
+                        .. ' left during the picking phase and nobody can replace them, event canceled[/font]'
+                )
+                force_end_captain_event()
+                return
+            end
         elseif not special.prepaPhase then
             local forceOfCaptain = 'north'
-            if player.name == special.captainList[2] then
+            if Teams.count() > 2 then
+                forceOfCaptain = CaptainTeams.captain_team(special.captainList, {}, Teams.all(), player.name)
+            elseif player.name == special.captainList[2] then
                 forceOfCaptain = 'south'
             end
 
@@ -2305,7 +2631,7 @@ end
 local function every_1sec(event)
     local special = storage.special_games_variables.captain_mode
     if special then
-        for _, force_name in pairs({ 'north', 'south' }) do
+        for _, force_name in pairs(Teams.all()) do
             local willingness = special.captainWillingness[force_name]
             if willingness then
                 if willingness.stop_tick <= event.tick then
@@ -2353,7 +2679,7 @@ local function on_tick(event)
     -- Also refresh UI.
     if special.captain_pick_timer_paused then
         special.captain_pick_timer_last_update = event.tick
-        for _, force_name in ipairs({ 'north', 'south' }) do
+        for _, force_name in ipairs(Teams.all()) do
             CaptainUI.try_update_picking_ui_timer(force_name)
         end
         return
@@ -2373,7 +2699,7 @@ local function on_tick(event)
     special.captain_pick_timer_last_update = event.tick
     -- Because we don't know who the captain is as we might be dealing with
     -- community picks, we have to iterate over all players to find picking UI.
-    for _, force_name in ipairs({ 'north', 'south' }) do
+    for _, force_name in ipairs(Teams.all()) do
         CaptainUI.try_update_picking_ui_timer(force_name)
     end
 end
@@ -3279,6 +3605,11 @@ function Public.update_captain_player_gui(player, frame)
             local info_a = player_info[a]
             local info_b = player_info[b]
             if info_a.force ~= info_b.force then
+                if Teams.count() > 2 then
+                    local teams = Teams.all()
+                    return (CaptainTeams.captain_index(teams, info_a.force) or 99)
+                        < (CaptainTeams.captain_index(teams, info_b.force) or 99)
+                end
                 return info_a.force == 'north'
             end
             if info_a.playtime ~= info_b.playtime then
@@ -3368,7 +3699,7 @@ function Public.update_captain_referee_gui(player, frame)
 
     -- if game hasn't started, and at least one captain isn't ready, show a button to force both captains to be ready
     if special.prepaPhase and special.initialPickingPhaseStarted and not special.pickingPhase then
-        if #special.listTeamReadyToPlay < 2 then
+        if #special.listTeamReadyToPlay < Teams.count() then
             scroll.add({
                 type = 'label',
                 caption = 'Teams ready to play: ' .. concat(special.listTeamReadyToPlay, ', '),
@@ -3497,7 +3828,7 @@ function Public.update_captain_referee_gui(player, frame)
             caption = 'North will be the first (non-rejected) captain in the list of captain volunteers above.',
         })
     end
-    for _, force in pairs({ 'north', 'south' }) do
+    for _, force in pairs(Teams.all()) do
         local flow = scroll.add({ type = 'flow', direction = 'horizontal', name = force })
         local favor = special.nextAutoPicksFavor[force]
         flow.add({
@@ -3577,7 +3908,10 @@ function Public.update_captain_manager_gui(player, frame)
         )
     end
     local throwScienceSetting = special.northEnabledScienceThrow
-    if special.captainList[2] == player.name then
+    local n_team = Teams.count() > 2 and CaptainTeams.captain_team(special.captainList, {}, Teams.all(), player.name)
+    if n_team then
+        throwScienceSetting = special[n_team .. 'EnabledScienceThrow']
+    elseif special.captainList[2] == player.name then
         throwScienceSetting = special.southEnabledScienceThrow
     end
     local caption = throwScienceSetting and 'Click to disable throwing science for the team'
@@ -3587,7 +3921,9 @@ function Public.update_captain_manager_gui(player, frame)
         .. (throwScienceSetting and '[color=green]YES[/color]' or '[color=red]NO[/color]')
 
     local tablePlayerListThrowAllowed = special.northThrowPlayersListAllowed
-    if player.name == special.captainList[2] then
+    if n_team then
+        tablePlayerListThrowAllowed = special[n_team .. 'ThrowPlayersListAllowed']
+    elseif player.name == special.captainList[2] then
         tablePlayerListThrowAllowed = special.southThrowPlayersListAllowed
     end
     frame.trusted_to_throw_list_label.caption = 'List of players trusted to throw : '
@@ -3697,6 +4033,14 @@ function Public.keep_only_the_captain_with_most_playtime()
         })
     end
     table.sort(playerTimes, sortByPlaytime)
+    if Teams.count() > 2 then
+        special.captainList = {}
+        for i = 1, Teams.count() do
+            special.captainList[i] = playerTimes[i].name
+        end
+        game.print('The captains will be (debug) : ' .. concat(special.captainList, ','))
+        return
+    end
     special.captainList = {
         playerTimes[1].name,
         playerTimes[2].name,
@@ -3717,14 +4061,14 @@ decrement_timer_captain_start_token = Token.register(function()
         local textToPrint = '[font=default-large-bold]Remaining time before the automatic start of captain event : '
             .. storage.automatic_captain_time_remaining_for_start / 60
             .. ' seconds.[/font]'
-        if #special.captainList < 2 then
+        if #special.captainList < Teams.count() then
             local captainText = ' captain '
-            if #special.captainList == 0 then
+            if Teams.count() - #special.captainList > 1 then
                 captainText = ' captains '
             end
             textToPrint = textToPrint
                 .. ' [color=red]Missing '
-                .. 2 - #special.captainList
+                .. Teams.count() - #special.captainList
                 .. captainText
                 .. 'or the event wont start at the end of this remaining time ![/color]'
         end
@@ -3737,14 +4081,14 @@ decrement_timer_captain_start_token = Token.register(function()
         end
         Task.set_timeout_in_ticks(60, decrement_timer_captain_start_token)
     else
-        if #special.captainList < 2 then
+        if #special.captainList < Teams.count() then
             game.print(
                 'Not enough captains to automatically start captain event...',
                 { color = { r = 1, g = 0, b = 0 } }
             )
             force_end_captain_event()
-        elseif #special.captainList == 2 then
-            if #special.listPlayers < 2 then
+        elseif #special.captainList == Teams.count() then
+            if #special.listPlayers < Teams.count() then
                 game.print(
                     'Not enough players to automatically start captain event...',
                     { color = { r = 1, g = 0, b = 0 } }
@@ -3755,7 +4099,9 @@ decrement_timer_captain_start_token = Token.register(function()
                 start_picking_phase()
             end
         else
-            game.print('Too many captains, picking the 2 captains who have most playtime as captains')
+            game.print(
+                'Too many captains, picking the ' .. Teams.count() .. ' captains who have most playtime as captains'
+            )
             Public.keep_only_the_captain_with_most_playtime()
             prepare_for_captain()
             start_picking_phase()
@@ -3787,7 +4133,7 @@ end
 function Public.on_player_joined_team(player)
     local team = player.force.name
     if
-        (team == 'north' or team == 'south')
+        (team == 'north' or team == 'south' or (Teams.count() > 2 and Teams.is_active(team)))
         and is_research_locked(team)
         and not is_on_research_trustlist(team, player.name)
         and player.permission_group
@@ -3841,6 +4187,9 @@ function Public.captain_is_player_prohibited_to_throw(player)
         if player.force.name == 'south' then
             throwScienceSetting = special.southEnabledScienceThrow
             throwList = special.southThrowPlayersListAllowed
+        elseif Teams.count() > 2 and special[player.force.name .. 'EnabledScienceThrow'] ~= nil then
+            throwScienceSetting = special[player.force.name .. 'EnabledScienceThrow']
+            throwList = special[player.force.name .. 'ThrowPlayersListAllowed']
         end
         if not throwScienceSetting and not table_contains(throwList, player.name) then
             return true

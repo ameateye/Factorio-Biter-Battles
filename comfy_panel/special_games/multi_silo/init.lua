@@ -14,6 +14,7 @@ local Public = {
         caption = 'Multi silo',
         tooltip = "Create Dr.Claw's multi silo special",
     },
+    max_teams = 2,
     config = {},
     button = {
         name = 'apply',

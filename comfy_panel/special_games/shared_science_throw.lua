@@ -50,6 +50,7 @@ local Public = {
         caption = 'Shared throws of science',
         tooltip = 'Science throws are shared between both teams',
     },
+    max_teams = 2,
     config = {},
     button = { name = 'apply', type = 'button', caption = 'Apply' },
     generate = function(config, player)

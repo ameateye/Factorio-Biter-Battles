@@ -1,6 +1,14 @@
 local _TEST = storage['_TEST'] or false
 local Color = require('utils.color_presets')
+local Layout = require('maps.biter_battles_v2.layout')
 local Tables = require('maps.biter_battles_v2.tables')
+local Teams = require('maps.biter_battles_v2.teams')
+-- Appended rather than sorted in, so that the three requires above still resolve
+-- in exactly the order they always did. It is a leaf as far as this file is
+-- concerned: match_format reaches only feeding_params and teams, neither of
+-- which reaches back here, so there is no cycle and nothing new runs at load.
+local MatchFormat = require('maps.biter_battles_v2.match_format')
+local NteamWording = require('maps.biter_battles_v2.nteam_wording')
 local ClosableFrame, Config, Gui, Server, simplex_noise
 if not _TEST then
     ClosableFrame = require('utils.ui.closable_frame')
@@ -215,12 +223,20 @@ function Functions.maybe_set_game_start_tick(event)
         return
     end
     local player = game.get_player(event.player_index)
-    if player.force.name ~= 'north' and player.force.name ~= 'south' then
+    if not Teams.is_active(player.force.name) then
         return
     end
     Functions.set_game_start_tick()
 end
 
+---GO. The one place in the scenario that learns the round has started, so it is
+---also where the league's record for it is recognised: the daemon writes
+---`storage.bb_league_match` at GO and this is the first moment the scenario can
+---say what it made of it.
+---
+---`log_recognised_once()` is silent unless there is something new to say -- a v2
+---record, a round of more than two teams, or a team-count mismatch -- so a
+---two-team round with today's record adds no log line and writes no storage key.
 function Functions.set_game_start_tick()
     if storage.bb_game_start_tick then
         return
@@ -228,6 +244,24 @@ function Functions.set_game_start_tick()
     storage.bb_game_start_tick = game.tick
     local message = 'The match has started! '
     Server.to_discord_bold(table.concat({ '*** ', message, ' ***' }))
+    MatchFormat.log_recognised_once()
+end
+
+---True inside the band along a river of the CURRENT map, where a biter is let
+---through without landfilling anything.
+---
+---'horizontal2': today's `|y| < 8`, the one river at y = 0.
+---'cross4': `|x| < 8 or |y| < 8` -- every quadrant faces a second river along
+---the other axis, and the band is the same eight tiles wide on both arms. The
+---`y` test is asked first and on its own, so the two-team map evaluates exactly
+---what it evaluates today.
+---@param position MapPosition
+---@return boolean
+function Functions.is_river_landfill_band(position)
+    if math_abs(position.y) < 8 then
+        return true
+    end
+    return Teams.layout() == 'cross4' and math_abs(position.x) < 8
 end
 
 function Functions.biters_landfill(entity)
@@ -235,7 +269,7 @@ function Functions.biters_landfill(entity)
         return
     end
     local position = entity.position
-    if math_abs(position.y) < 8 then
+    if Functions.is_river_landfill_band(position) then
         return true
     end
     local surface = entity.surface
@@ -352,10 +386,74 @@ function Functions.init_player(player)
     game.permissions.get_group('spectator').add_player(player)
 end
 
-function Functions.is_roughly_biter_area(position)
+---Today's expression, asked in the CANONICAL frame: the north wedge, which
+---starts `bitera_area_distance` beyond the river and widens by
+---`biter_area_slope` per tile away from the axis. Both functions below reach it
+---once their position has been brought back to that frame, so the arithmetic --
+---and with it the order the floats are combined in -- is written exactly once.
+---@param x number
+---@param y number
+---@return boolean
+local function is_canonical_biter_area(x, y)
     local bitera_area_distance = Config.bitera_area_distance * -1
-    local a = bitera_area_distance - (math_abs(position.x) * Config.biter_area_slope)
-    return position.y <= a
+    local a = bitera_area_distance - (math_abs(x) * Config.biter_area_slope)
+    return y <= a
+end
+
+---True when `position` is roughly inside a team's own biter area.
+---
+---'horizontal2': today's expression unchanged -- the NORTH wedge only, so the
+---southern half of the map never answers true (which is why `no_turret_creep`
+---folds before it asks).
+---'cross4': the position is brought back to the canonical frame of its own
+---quadrant and asked the very same question, so each of the three or four
+---wedges answers for itself. No biters live in the closed quadrant of a
+---three-team round, so nothing there is biter area.
+---@param position MapPosition
+---@return boolean
+function Functions.is_roughly_biter_area(position)
+    if Teams.layout() == 'cross4' then
+        local k = Layout.quadrant_of_position(position.x, position.y)
+        if Layout.is_closed_quadrant(k) then
+            return false
+        end
+        return is_canonical_biter_area(Layout.unrotate_position(k, position.x, position.y))
+    end
+    return is_canonical_biter_area(position.x, position.y)
+end
+
+---True where the turret-creep rule applies: the point, folded onto the canonical
+---biter wedge, lands inside it.
+---
+---The fold is today's, and today's is two INDEPENDENT `if`s rather than an
+---if/else: a point south of the river is first mirrored to `-(y + 100)` and
+---then, being negative by now, pushed another 100 tiles out, so the southern
+---half is probed 200 tiles deeper than the northern one and `y == 0` is probed
+---where it lies. That asymmetry is today's behaviour and is kept verbatim.
+---
+---'cross4': the point is brought back to the canonical frame of its quadrant
+---first and the same two `if`s run there. A canonical point never has a positive
+---y, so only the `- 100` of the second one can fire -- the wedge is probed the
+---same 100 tiles out for every team. A closed quadrant has no biters, hence no
+---creep rule.
+---@param position MapPosition
+---@return boolean
+function Functions.is_turret_creep_area(position)
+    local x, y = position.x, position.y
+    if Teams.layout() == 'cross4' then
+        local k = Layout.quadrant_of_position(x, y)
+        if Layout.is_closed_quadrant(k) then
+            return false
+        end
+        x, y = Layout.unrotate_position(k, x, y)
+    end
+    if y > 0 then
+        y = (y + 100) * -1
+    end
+    if y < 0 then
+        y = y - 100
+    end
+    return is_canonical_biter_area(x, y)
 end
 
 function Functions.no_turret_creep(event)
@@ -367,14 +465,7 @@ function Functions.no_turret_creep(event)
         return
     end
 
-    local posEntity = entity.position
-    if posEntity.y > 0 then
-        posEntity.y = (posEntity.y + 100) * -1
-    end
-    if posEntity.y < 0 then
-        posEntity.y = posEntity.y - 100
-    end
-    if not Functions.is_roughly_biter_area(posEntity) then
+    if not Functions.is_turret_creep_area(entity.position) then
         return
     end
 
@@ -446,27 +537,20 @@ function Functions.get_ticks_since_game_start()
     return game.tick - start_tick
 end
 
+--- The name to show for a force. The custom name, the layout's name for the
+--- team and the fallback to the force name itself all live in `Teams`.
+--- @param force_name string
+--- @return string
 function Functions.team_name(force_name)
-    local name = storage.tm_custom_name[force_name]
-    if name == nil then
-        if force_name == 'north' then
-            name = Config.north_side_team_name
-        elseif force_name == 'south' then
-            name = Config.south_side_team_name
-        end
-    end
-    return name or force_name
+    return Teams.display_name(force_name)
 end
 
+--- The same name inside the team's colour tag; anything that is not a team of
+--- the roster is returned uncoloured.
+--- @param force_name string
+--- @return string
 function Functions.team_name_with_color(force_name)
-    local name = Functions.team_name(force_name)
-    if force_name == 'north' then
-        return '[color=120, 120, 255]' .. name .. '[/color]'
-    elseif force_name == 'south' then
-        return '[color=255, 65, 65]' .. name .. '[/color]'
-    else
-        return name
-    end
+    return Teams.name_with_color(force_name)
 end
 
 -- Returns every possible player name that follows "@" or "@ " in the message, as well as every name that preceeds "@"
@@ -541,9 +625,27 @@ function Functions.spy_fish(player, event)
         if x == 0 then
             i2.remove({ name = 'raw-fish', count = send_amount })
         end
-        local enemy_team = 'south'
-        if player.force.name == 'south' then
-            enemy_team = 'north'
+        local enemy_team
+        local enemy_titles
+        if Teams.count() == 2 then
+            -- Kept verbatim: the other one of the two, whoever sent the fish
+            -- and whatever the training mode says, exactly as before.
+            enemy_team = 'south'
+            if player.force.name == 'south' then
+                enemy_team = 'north'
+            end
+        else
+            -- Above two teams a fish buys vision on every alive enemy at once.
+            -- The bookkeeping therefore stays one number per spying force --
+            -- the shape `Gui.spy_fish` turns into charted chunks
+            -- (gui.lua:1334-1361) -- and the announcement names every enemy the
+            -- fish paid for.
+            -- Named by their coloured titles ('Top Right'), never by the force
+            -- name a player has never seen on this map.
+            enemy_titles = {}
+            for _, enemy in ipairs(Teams.enemies_of(player.force.name)) do
+                enemy_titles[#enemy_titles + 1] = Teams.name_with_color(enemy)
+            end
         end
         if storage.spy_fish_timeout[player.force.name] - game.tick > 0 then
             storage.spy_fish_timeout[player.force.name] = storage.spy_fish_timeout[player.force.name]
@@ -569,7 +671,7 @@ function Functions.spy_fish(player, event)
             end
         else
             game.print(
-                player.name .. ' sent ' .. send_amount .. ' fish to spy on ' .. enemy_team .. ' team!',
+                NteamWording.spy_fish_message(player.name, send_amount, Teams.count(), enemy_team, enemy_titles),
                 { color = { r = 0.98, g = 0.66, b = 0.22 } }
             )
             storage.spy_fish_timeout[player.force.name] = game.tick + duration_per_unit * send_amount
@@ -594,8 +696,13 @@ function Functions.show_intro(player)
     local frame = ClosableFrame.create_main_closable_frame(player, 'map_intro_frame', '-- Biter Battles --')
 
     local scroll = frame.add({ type = 'scroll-pane' })
-    local label =
-        scroll.add({ type = 'label', caption = { 'biter_battles.map_info' }, name = 'biter_battles_map_intro' })
+    -- The four-square map has no horizontal river and no North and South: it
+    -- gets its own text. The two-team map keeps today's key.
+    local label = scroll.add({
+        type = 'label',
+        caption = { NteamWording.map_info_key(Teams.layout()) },
+        name = 'biter_battles_map_intro',
+    })
     gui_style(label, { single_line = false, font_color = { 255, 255, 255 } })
 end
 

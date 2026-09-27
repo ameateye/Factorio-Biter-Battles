@@ -2,6 +2,7 @@ local Feeding = require('maps.biter_battles_v2.feeding')
 local Tables = require('maps.biter_battles_v2.tables')
 local Functions = require('maps.biter_battles_v2.functions')
 local Server = require('utils.server')
+local Teams = require('maps.biter_battles_v2.teams')
 
 local Public = {}
 
@@ -10,11 +11,7 @@ Public.autofeed = function()
     local steel_chests = surface.find_entities_filtered({ name = 'steel-chest' })
     for i, chest in pairs(steel_chests) do
         local chest_inventory = chest.get_inventory(defines.inventory.chest)
-        if
-            chest_inventory
-            and not chest_inventory.is_empty()
-            and (chest.force.name == 'north' or chest.force.name == 'south')
-        then
+        if chest_inventory and not chest_inventory.is_empty() and Teams.is_active(chest.force.name) then
             for science_pack, _ in pairs(Tables.food_values) do
                 local science_count = chest_inventory.get_item_count_filtered({ name = science_pack })
                 if science_count > 0 then
@@ -26,7 +23,9 @@ Public.autofeed = function()
 end
 
 Public.print_autofeed_message = function()
-    local forces = { 'north', 'south' }
+    -- Ring order, which is north then south with two teams: it is the order of
+    -- the chat summary, of the Discord summary and of the clearing pass.
+    local forces = Teams.all()
     local autofeed_rgb = { r = 0, g = 0.7, b = 1 }
 
     local header_r = autofeed_rgb.r * 0.6 + 0.35

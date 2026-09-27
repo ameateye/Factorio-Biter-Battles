@@ -95,6 +95,7 @@ local Public = {
         caption = 'mk2Fordeka',
         tooltip = 'classic fordeka special, hand miming speed 4000, bots speed 15, bots tech, mk2, bots, drills, battery, exoskeleton, fission-reactor, personal-roboport',
     },
+    max_teams = 2,
     config = {},
     button = { name = 'apply', type = 'button', caption = 'Apply' },
     generate = function(config, player)

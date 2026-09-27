@@ -2,6 +2,8 @@ local flui = require('utils.ui.gui-lite')
 local uic = require('utils.ui.fcomponents')
 local Event = require('utils.event')
 local Functions = require('maps.biter_battles_v2.functions')
+local Teams = require('maps.biter_battles_v2.teams')
+local Layout = require('maps.biter_battles_v2.layout')
 local closable_frame = require('utils.ui.closable_frame')
 local string_format = string.format
 local table_sort = table.sort
@@ -10,6 +12,12 @@ local table_insert = table.insert
 
 local MAXHEIGHT_PADDING = 50
 
+---The window's static skeleton: one panel per active team, then the shared
+---bucket. Built on demand rather than once at load, because the panel list
+---comes from the round's team registry and reading it creates the round state.
+---With two teams this is the same tree in the same order as the literal
+---`{ 'north', 'south' }` it replaces.
+---@return GuiElemDef
 local function ui_template()
     --[[
         research_info_ui
@@ -17,9 +25,37 @@ local function ui_template()
                 main
     ]]
     local container = uic.blocks.vflow('main')
-    local teams = uic.add(container, uic.blocks.hflow('teams'))
+    -- Two teams keep the one-row `hflow` they have always had. Above two teams
+    -- the panels go in a two-column grid -- 2x2 with four teams, 2+1 with three
+    -- -- so that no panel is ever more than half the window wide: four 365 px
+    -- panels in a row are ~1500 px and the window's scroll pane has no
+    -- horizontal axis to recover them with (`horizontal_scroll_policy =
+    -- 'never'`), so the fourth was simply cut off by the edge of the screen
+    -- (screenshot gui4-before/02-research-info.png).
+    --
+    -- That grid is a picture of the map, so the panels go in it in MAP order
+    -- (`Layout.grid_order`), not in the ring order the rest of the scenario
+    -- iterates in: the ring is a pinwheel, and laying it out row by row put the
+    -- bottom-right team in the bottom-left cell -- seen in the client on
+    -- 2026-09-20. With three teams the bottom-left cell is the closed quadrant
+    -- and gets an empty widget, so the bottom-right panel stays bottom right.
+    -- With two teams `grid_order` is `Teams.all()` and there is no hole, so the
+    -- one-row strip below is the tree it has always been.
+    local teams
+    if Teams.count() == 2 then
+        teams = uic.add(container, uic.blocks.hflow('teams'))
+    else
+        teams = uic.add(container, uic.blocks.table(2, 'teams'))
+    end
     teams.style_mods = { vertically_stretchable = true }
-    for _, name in ipairs({ 'north', 'south' }) do
+    for cell, name in ipairs(Layout.grid_order()) do
+        if not name then
+            uic.add(teams, {
+                type = 'empty-widget',
+                name = 'empty_cell_' .. cell,
+            })
+            goto continue
+        end
         uic.add(teams, {
             type = 'frame',
             style = 'inside_shallow_frame_with_padding',
@@ -120,6 +156,7 @@ local function ui_template()
                 },
             },
         })
+        ::continue::
     end
     uic.add(container, {
         type = 'frame',
@@ -128,7 +165,7 @@ local function ui_template()
         name = 'both_teams',
         {
             type = 'label',
-            caption = 'Researched (both)',
+            caption = Teams.count() == 2 and 'Researched (both)' or 'Researched (all teams)',
             style_mods = {
                 font = 'heading-1',
             },
@@ -156,22 +193,39 @@ local function ui_template()
     })
     return container
 end
-local UI = ui_template()
+
+---@alias research_info.tech_state { desc: string | nil, pct: number | nil, active: boolean }
+
+---The name a tech tooltip gives a team's line: the force name with its first
+---letter capitalised, which is the 'North' / 'South' of today to the byte.
+---@param team string
+---@return string
+local function tooltip_name(team)
+    return team:sub(1, 1):upper() .. team:sub(2)
+end
+
+---One line per active team, in `Teams.all()` order -- for two teams exactly the
+---two fixed lines this replaces, same order, same separator.
+---@param info table<string, research_info.tech_state>
+---@return string
+local function tech_tooltip(info)
+    local tooltip_items = {}
+    for _, team in ipairs(Teams.all()) do
+        local team_info = info[team]
+        table_insert(tooltip_items, tooltip_name(team) .. ': ' .. ((team_info and team_info.desc) or 'Not started'))
+    end
+    return table_concat(tooltip_items, '\n')
+end
 
 ---@param tech_id string
----@param north_desc string | nil
----@param south_desc string | nil
+---@param info table<string, research_info.tech_state>
 ---@return GuiElemDef
-local function research_item(tech_id, north_desc, south_desc)
-    local tooltip_items = {
-        'North: ' .. (north_desc or 'Not started'),
-        'South: ' .. (south_desc or 'Not started'),
-    }
+local function research_item(tech_id, info)
     ---@type GuiElemDef
     return {
         type = 'sprite',
         sprite = 'technology/' .. tech_id,
-        tooltip = table_concat(tooltip_items, '\n'),
+        tooltip = tech_tooltip(info),
         elem_tooltip = { type = 'technology', name = tech_id },
         name = '_' .. tech_id,
         tags = {
@@ -192,13 +246,9 @@ end
 ---@param tech_id string
 ---@param this_progress number
 ---@param is_active boolean
----@param north_desc string | nil
----@param south_desc string | nil
+---@param info table<string, research_info.tech_state>
 ---@return GuiElemDef
-local function progress_research_item(tech_id, this_progress, is_active, north_desc, south_desc)
-    local tooltip_items = {}
-    table_insert(tooltip_items, 'North: ' .. (north_desc or 'Not started'))
-    table_insert(tooltip_items, 'South: ' .. (south_desc or 'Not started'))
+local function progress_research_item(tech_id, this_progress, is_active, info)
     ---@type GuiElemDef
     local el = {
         type = 'flow',
@@ -212,11 +262,11 @@ local function progress_research_item(tech_id, this_progress, is_active, north_d
             sort_by = tech_id,
             tech_id = tech_id,
         },
-        research_item(tech_id, north_desc, south_desc),
+        research_item(tech_id, info),
         {
             type = 'progressbar',
             value = this_progress,
-            tooltip = table_concat(tooltip_items, '\n'),
+            tooltip = tech_tooltip(info),
             style_mods = {
                 color = is_active and { 0, 1, 0 } or { 1, 1, 0 },
             },
@@ -264,7 +314,7 @@ end
 ---@param tech_name string
 function ResearchInfo.research_finished(tech_name, force)
     local force_name = force.name
-    if force_name ~= 'north' and force_name ~= 'south' then
+    if not Teams.is_active(force_name) then
         return
     end
     local tech_info = storage.research_info.completed[tech_name]
@@ -283,7 +333,7 @@ end
 ---@param tech_name string
 function ResearchInfo.research_started(tech_name, force)
     local force_name = force.name
-    if force_name ~= 'north' and force_name ~= 'south' then
+    if not Teams.is_active(force_name) then
         return
     end
     storage.research_info.current_progress[force_name][tech_name] = true
@@ -293,7 +343,7 @@ end
 ---@param force LuaForce
 ---@param tech_name string
 function ResearchInfo.research_reversed(tech_name, force)
-    if force.name ~= 'north' and force.name ~= 'south' then
+    if not Teams.is_active(force.name) then
         return
     end
     local tech_info = storage.research_info.completed[tech_name]
@@ -304,6 +354,11 @@ function ResearchInfo.research_reversed(tech_name, force)
     ResearchInfo.update_research_info_ui(true)
 end
 
+---What every active team has done with `tech_id`, keyed by force name and built
+---in `Teams.all()` order -- the hand-written two-key record this replaces, with
+---the two forces read in the same order.
+---@param tech_id string
+---@return table<string, research_info.tech_state>
 local function get_research_info(tech_id)
     local tech_info = storage.research_info.completed[tech_id]
 
@@ -337,20 +392,16 @@ local function get_research_info(tech_id)
         return result, progress, active
     end
 
-    local north, north_pct, north_active = format(game.forces.north)
-    local south, south_pct, south_active = format(game.forces.south)
-    return {
-        north = {
-            desc = north,
-            pct = north_pct,
-            active = north_active,
-        },
-        south = {
-            desc = south,
-            pct = south_pct,
-            active = south_active,
-        },
-    }
+    local info = {}
+    for _, team in ipairs(Teams.all()) do
+        local desc, pct, active = format(game.forces[team])
+        info[team] = {
+            desc = desc,
+            pct = pct,
+            active = active,
+        }
+    end
+    return info
 end
 
 ---@param filter fun(tech_name: string, tech_info: unknown): boolean
@@ -361,7 +412,7 @@ local function construct_completed(filter)
     for tech_name, tech_info in pairs(storage.research_info.completed) do
         if filter(tech_name, tech_info) then
             local info = get_research_info(tech_name)
-            elements[#elements + 1] = research_item(tech_name, info.north.desc, info.south.desc)
+            elements[#elements + 1] = research_item(tech_name, info)
         end
     end
     table_sort(elements, function(a, b)
@@ -384,7 +435,7 @@ local function construct_research_queue(force)
     else
         for _, tech in ipairs(queue_data) do
             local research_info = get_research_info(tech.name)
-            uic.add(queue_elem, research_item(tech.name, research_info.north.desc, research_info.south.desc))
+            uic.add(queue_elem, research_item(tech.name, research_info))
         end
     end
     return queue_elem
@@ -402,7 +453,7 @@ local function construct_progress(force)
         local active = tech_info[force.name].active or false
         if progress then
             matches = matches + 1
-            uic.add(el, progress_research_item(tech_name, progress, active, tech_info.north.desc, tech_info.south.desc))
+            uic.add(el, progress_research_item(tech_name, progress, active, tech_info))
         end
     end
     if matches == 0 then
@@ -413,33 +464,33 @@ end
 
 ---@alias research_info.ui_update_package.team { queue: GuiElemDef, progress: GuiElemDef, excl_completed: GuiElemDef[] }
 
+---One `research_info.ui_update_package.team` per active team, keyed by force
+---name, plus the bucket shared by all of them.
 ---@class research_info.ui_update_package
----@field north? research_info.ui_update_package.team
----@field south? research_info.ui_update_package.team
----@field both_completed? GuiElemDef[]
-
----@class research_info.ui_update_package.concrete : research_info.ui_update_package
----@field north research_info.ui_update_package.team
----@field south research_info.ui_update_package.team
 ---@field both_completed GuiElemDef[]
 
 ---@param element LuaGuiElement
----@param package research_info.ui_update_package.concrete
+---@param package research_info.ui_update_package
 ---@param completed_technologies_changed boolean?
 local function update_research_info_element(element, package, completed_technologies_changed)
     local frame_teams = element.teams
-    for _, force in pairs({ 'north', 'south' }) do
+    for _, force in ipairs(Teams.all()) do
         local team_data = package[force] --[[@as research_info.ui_update_package.team]]
         local team_frame = frame_teams[force]
-        team_frame.queue_frame.queue.destroy()
-        flui.add(team_frame.queue_frame, team_data.queue)
-        team_frame.progress_frame.progress.destroy()
-        flui.add(team_frame.progress_frame, team_data.progress)
+        -- An open window is not rebuilt by a map reset (INVENTORY 2.7), so a
+        -- window from a round with other teams has no panel for this one. Both
+        -- panels are always there for a two-team round.
+        if team_frame and team_data then
+            team_frame.queue_frame.queue.destroy()
+            flui.add(team_frame.queue_frame, team_data.queue)
+            team_frame.progress_frame.progress.destroy()
+            flui.add(team_frame.progress_frame, team_data.progress)
 
-        if completed_technologies_changed then
-            team_frame.completed_frame.completed.clear()
-            for _, v in pairs(team_data.excl_completed) do
-                flui.add(team_frame.completed_frame.completed, v)
+            if completed_technologies_changed then
+                team_frame.completed_frame.completed.clear()
+                for _, v in pairs(team_data.excl_completed) do
+                    flui.add(team_frame.completed_frame.completed, v)
+                end
             end
         end
     end
@@ -464,24 +515,41 @@ local function update_research_info_size(player, element)
     element.style.maximal_height = eff - (MAXHEIGHT_PADDING * 2)
 end
 
----@return research_info.ui_update_package.concrete
+---@return research_info.ui_update_package
 local function calculate_ui()
+    local teams = Teams.all()
     ---@type research_info.ui_update_package
     local data = {}
-    for team, opposition in pairs({ north = 'south', south = 'north' }) do
+    for _, team in ipairs(teams) do
         local force = game.forces[team]
         data[team] = {
             queue = construct_research_queue(force),
             progress = construct_progress(force),
+            -- 'exclusive' = researched by this team and by no other active one;
+            -- with two teams that is 'mine and not the other's', unchanged.
             excl_completed = construct_completed(function(_, info)
-                return info[team] and not info[opposition]
+                if not info[team] then
+                    return false
+                end
+                for _, other in ipairs(teams) do
+                    if other ~= team and info[other] then
+                        return false
+                    end
+                end
+                return true
             end),
         }
     end
+    -- The shared bucket is what every active team has researched; with two
+    -- teams, `info.north and info.south` tested in that order.
     data.both_completed = construct_completed(function(_, info)
-        return info.north and info.south
+        for _, team in ipairs(teams) do
+            if not info[team] then
+                return false
+            end
+        end
+        return true
     end)
-    ---@cast data research_info.ui_update_package.concrete
     return data
 end
 
@@ -508,16 +576,18 @@ function ResearchInfo.show_research_info(player)
         return
     end
 
-    frame = closable_frame.create_main_closable_frame(player, 'research_info_frame', 'Research summary for both teams')
+    local title = Teams.count() == 2 and 'Research summary for both teams' or 'Research summary for all teams'
+    frame = closable_frame.create_main_closable_frame(player, 'research_info_frame', title)
     local scroll = frame.add({
         type = 'scroll-pane',
         horizontal_scroll_policy = 'never',
         vertical_scroll_policy = 'always',
         name = 'scroll',
     })
-    local named_elements = flui.add(scroll, UI)
-    named_elements['team_name_south'].caption = Functions.team_name_with_color('south')
-    named_elements['team_name_north'].caption = Functions.team_name_with_color('north')
+    local named_elements = flui.add(scroll, ui_template())
+    for _, team in ipairs(Teams.all()) do
+        named_elements['team_name_' .. team].caption = Functions.team_name_with_color(team)
+    end
     local el = player.gui.screen['research_info_frame']
     update_research_info_size(player, el)
     local data = calculate_ui()

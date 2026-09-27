@@ -1,9 +1,32 @@
 local FeedingParams = require('maps.biter_battles_v2.feeding_params')
 local Tables = require('maps.biter_battles_v2.tables')
+local Teams = require('maps.biter_battles_v2.teams')
 
 local math_floor = math.floor
 
 local Public = {}
+
+---The team a `force=` argument names, or nil when it names none.
+---
+---Every team of the round answers to three spellings: its initial, that initial
+---followed by 'th', and its own name -- `n`/`nth`/`north` and `s`/`sth`/`south`,
+---the two the command has always taken, continued to the other two teams. A
+---spelling only resolves while its team is playing, so `force=east` is an
+---invalid force in a two-team game, exactly as it is today
+---(tests/test-calc-send-routing.lua pins that).
+---@param value string
+---@return string|nil team
+local function team_of_force_arg(value)
+    local teams = Teams.all()
+    for index = 1, #teams do
+        local team = teams[index]
+        local initial = string.sub(team, 1, 1)
+        if value == initial or value == initial .. 'th' or value == team then
+            return team
+        end
+    end
+    return nil
+end
 
 -- The three feeding curves. Every constant in them is a parameter now, held in
 -- feeding_params.lua and retunable in a running game with /feeding-params:
@@ -99,14 +122,23 @@ function Public.calc_send_command(
     local flask_color
     local flask_count
     local force_to_send_to
+    -- The example names the first team of the round, which is 'north' whatever
+    -- the team count -- today's help text, byte for byte.
     local help_text = '\nUsage: /calc-send evo=20.0 difficulty=30 players=4 color=green count=1000'
-        .. '\nUsage: /calc-send force=north color=white count=1000'
+        .. '\nUsage: /calc-send force='
+        .. Teams.all()[1]
+        .. ' color=white count=1000'
     if player and training_mode then
         force_to_send_to = player.force.name
-    elseif player and player.force.name == 'north' then
-        force_to_send_to = 'south'
-    elseif player and player.force.name == 'south' then
-        force_to_send_to = 'north'
+    elseif player then
+        -- With two teams this is the sender's one enemy, exactly the ternary
+        -- chain it replaces. Above two teams a split send has no single target
+        -- to price, so there is no default and `force=` (or `evo=`) has to say
+        -- which one -- as it already has to for a sender on no team at all.
+        local targets = Teams.feed_targets(player.force.name)
+        if #targets == 1 then
+            force_to_send_to = targets[1].team
+        end
     end
     -- indexed by strings like "automation-science-pack"
     local foods = {}
@@ -114,10 +146,9 @@ function Public.calc_send_command(
         local k, v = string.match(param, '^(%w+)=([%w%p]+)$')
         if k and v then
             if k == 'force' then
-                if v == 'n' or v == 'nth' or v == 'north' then
-                    force_to_send_to = 'north'
-                elseif v == 's' or v == 'sth' or v == 'south' then
-                    force_to_send_to = 'south'
+                local named_team = team_of_force_arg(v)
+                if named_team then
+                    force_to_send_to = named_team
                 else
                     error_msg = 'Invalid force'
                 end
@@ -209,7 +240,7 @@ function Public.calc_send_command(
         end
     end
     if evo == nil and force_to_send_to then
-        local biter_force_name = force_to_send_to .. '_biters'
+        local biter_force_name = Teams.biter_force(force_to_send_to)
         if bb_evolution[biter_force_name] then
             evo = bb_evolution[biter_force_name] * 100
         end

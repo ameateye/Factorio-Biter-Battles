@@ -61,6 +61,7 @@ end
 
 local Public = {
     name = { type = 'label', caption = 'Infinity chest', tooltip = 'Spawn infinity chests with given filters' },
+    max_teams = 2,
     config = {
         [1] = { name = 'eq1', type = 'choose-elem-button', elem_type = 'item' },
         [2] = { name = 'eq2', type = 'choose-elem-button', elem_type = 'item' },

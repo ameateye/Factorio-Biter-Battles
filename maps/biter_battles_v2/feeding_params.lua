@@ -20,9 +20,11 @@
 --
 -- -- so a retune of 1v1 leaves 3v3 exactly where it was. Three layers resolve a
 -- field, most specific first: the admin's override for that format, whatever
--- the scenario ships differently for it (`format_defaults`), then the base
--- `defaults`. A partial override is a legitimate state rather than a half-built
--- table, so a save made before a field existed still loads.
+-- the scenario ships differently for it (`format_defaults`; on the BB League
+-- server, `league_format_defaults` over them), then the base `defaults` (on the
+-- BB League server, `league_defaults` over them). A partial override is a
+-- legitimate state rather than a half-built table, so a save made before a
+-- field existed still loads.
 
 local Public = {}
 
@@ -79,21 +81,67 @@ local defaults = {
     -- Lowered from 25 (2026-09-17). Permanent and format-independent: the floor
     -- was carrying too much of the early game at every team size.
     passive_linear = 15,
-    -- 200 -> 260 (2026-09-22). Instant threat is the half of a send a team can
-    -- see coming and play around; the passive income it buys is the half it
-    -- cannot. Raising c shifts weight toward the former without touching what a
-    -- flask is worth in evolution.
-    instant_scale = 260,
-    -- 1 -> 0.9 (2026-09-22). A broad damp on passive income across the board,
-    -- left as a multiplier rather than folded into a and b so the curve
-    -- underneath stays the shape those constants describe. Note 1v1 is
-    -- unaffected: `format_defaults` REPLACES this rather than composing with
-    -- it, so 1v1 stays at 0.5 rather than becoming 0.45.
-    passive_income_scale = 0.9,
+    instant_scale = 200,
+    -- The BB League plays another c and k: see `league_defaults` below.
+    passive_income_scale = 1,
     attack_interval = TICKS_PER_MINUTE,
 }
 
 Public.defaults = defaults
+
+---What the BB League server ships differently from `defaults`, for every format
+---that does not claim the field itself (1v1 claims c, k and the wave interval:
+---`league_format_defaults` sits above this layer exactly as `format_defaults`
+---sits above a retuned base).
+---
+---The other servers that load this scenario -- BB Captains shares the League's
+---scenario directory -- keep the classic numbers above.
+---
+---c 200 -> 260 (2026-09-22). Instant threat is the half of a send a team can see
+---coming and play around; the passive income it buys is the half it cannot.
+---Raising c shifts weight toward the former without touching what a flask is
+---worth in evolution.
+---
+---k 1 -> 0.9 (2026-09-22). A broad damp on passive income, left as a multiplier
+---rather than folded into a and b so the curve underneath stays the shape those
+---constants describe.
+local league_defaults = {
+    instant_scale = 260,
+    passive_income_scale = 0.9,
+}
+
+Public.league_defaults = league_defaults
+
+---True on the BB League server.
+---
+---The signal is `storage.tt_mode`: Triple Threat is what the League plays and
+---nothing else turns it on. The League's match-prep daemon sends `/tt-enable`
+---at T-15 of every match, before the T-10 map reset and long before the start;
+---the mode survives map resets (`tt_mode.on_map_reset`), and a server restart
+---inside a match window is healed by the same daemon re-sending it. No daemon
+---of the Captains or main servers sends it. It lives in `storage`, so every
+---peer reads the same value and the answer is deterministic.
+---@return boolean
+function Public.is_league()
+    local store = storage
+    return type(store) == 'table' and store.tt_mode == true
+end
+
+---The base a format falls back to when nothing more specific names the field:
+---the League's numbers on the League server, the classic ones everywhere else.
+---@param field string
+---@return number|boolean
+local function base_default(field)
+    if Public.is_league() then
+        local league = league_defaults[field]
+        if league ~= nil then
+            return league
+        end
+    end
+    return defaults[field]
+end
+
+Public.base_default = base_default
 
 ---What the scenario ships differently for one format. Anything not named here
 ---is the same number everywhere, so this stays a list of deliberate deviations
@@ -110,9 +158,57 @@ local format_defaults = {
 
 Public.format_defaults = format_defaults
 
+---What the BB League server ships differently for ONE format, over
+---`format_defaults`: the numbers its admins had tuned in a running game and
+---lost at every restart, made the shipped ones (2026-09-27, from a dump of the
+---live server; the League starts a fresh scenario at each restart, so nothing
+---written to `storage` outlives one).
+---
+---1v1 on the League: c 500, k 0.75, a wave every two minutes. Two players
+---hold the frontage a whole team otherwise holds, so the shipped half income
+---was retuned to three quarters, a send made worth more on landing, and the
+---waves spaced out. The other formats keep the League base (`league_defaults`).
+---Off the League, 1v1 keeps its classic 0.5 and nothing here is read.
+---
+---A retuned base does not reach the fields named here, for the reason given
+---at `inherited_for`: they are what the format *must* do differently.
+local league_format_defaults = {
+    ['1v1'] = {
+        instant_scale = 500,
+        passive_income_scale = 0.75,
+        attack_interval = 2 * TICKS_PER_MINUTE,
+    },
+}
+
+Public.league_format_defaults = league_format_defaults
+
+---The deviation the scenario ships for `field` in one format, or nil when the
+---format follows the base on it: the League's own deviation on the League
+---server (`league_format_defaults`), the classic one otherwise or where the
+---League names nothing (`format_defaults`).
+---@param field string
+---@param format_key string
+---@return number|boolean|nil
+local function format_default(field, format_key)
+    if Public.is_league() then
+        local league = league_format_defaults[format_key]
+        if league and league[field] ~= nil then
+            return league[field]
+        end
+    end
+    local per_format = format_defaults[format_key]
+    if per_format and per_format[field] ~= nil then
+        return per_format[field]
+    end
+    return nil
+end
+
+Public.format_default = format_default
+
 ---What the scenario *ships* for a field in a format: its deviation if it has
----one, the base default otherwise. Deliberately blind to anything an admin has
----tuned, which is what makes it the number a reset returns to.
+---one, the base default otherwise (the League's deviation and base on the
+---League server). Deliberately blind to anything an admin has tuned, which is
+---what makes it the number a reset returns to.
 ---
 ---For what a format actually falls back to in a running game -- which includes a
 ---retuned base -- see `inherited_for`.
@@ -120,11 +216,11 @@ Public.format_defaults = format_defaults
 ---@param format_key string
 ---@return number|boolean
 function Public.default_for(field, format_key)
-    local per_format = format_defaults[format_key]
-    if per_format and per_format[field] ~= nil then
-        return per_format[field]
+    local shipped = format_default(field, format_key)
+    if shipped ~= nil then
+        return shipped
     end
-    return defaults[field]
+    return base_default(field)
 end
 
 -- Field name -> the symbol it is called by in the formulas and in the lab, so
@@ -334,7 +430,11 @@ local function overrides(format_key)
 end
 
 ---What `field` falls back to for a format that is not overriding it: the
----format's shipped deviation, then the retuned base, then the shipped base.
+---format's shipped deviation (`league_format_defaults` over `format_defaults`
+---on the BB League server, `format_defaults` alone everywhere else), then the
+---retuned base, then the shipped base -- which is `league_defaults` over
+---`defaults` on the BB League server and `defaults` alone everywhere else
+---(`base_default`).
 ---
 ---This layer is what makes `default` a base rather than a tenth sibling. The
 ---common case -- "this number is wrong everywhere" -- is one command against
@@ -351,9 +451,9 @@ end
 ---@param format_key string
 ---@return number|boolean
 function Public.inherited_for(field, format_key)
-    local per_format = format_defaults[format_key]
-    if per_format and per_format[field] ~= nil then
-        return per_format[field]
+    local shipped = format_default(field, format_key)
+    if shipped ~= nil then
+        return shipped
     end
     if format_key ~= BASE_KEY then
         local base = overrides(BASE_KEY)
@@ -363,7 +463,7 @@ function Public.inherited_for(field, format_key)
             return tuned
         end
     end
-    return defaults[field]
+    return base_default(field)
 end
 
 ---True when a format is taking `field` from the retuned base rather than from
@@ -376,8 +476,7 @@ function Public.is_inherited(field, format_key)
     if format_key == BASE_KEY or Public.is_overridden(field, format_key) then
         return false
     end
-    local per_format = format_defaults[format_key]
-    if per_format and per_format[field] ~= nil then
+    if format_default(field, format_key) ~= nil then
         return false
     end
     local base = overrides(BASE_KEY)
@@ -411,6 +510,34 @@ function Public.get(format_key)
         end
     end
     return Public.clamp(resolved)
+end
+
+---`get(format_key).attack_interval` without building the set.
+---
+---Above two teams the attack clock asks the dispatcher for the interval on
+---every 30-tick slot -- 120 times a minute (`main.lua`'s on_tick) -- and `get()`
+---answers by allocating a table, walking `pairs(defaults)` and clamping all nine
+---fields to read one integer out of it. This reads that one field and clamps
+---that one, in the same two steps and the same order `Public.clamp` applies:
+---`attack_interval` has a `limits` entry and a `steps` entry, and nothing in
+---`clamp` makes any field depend on another except `passive_power`, whose window
+---is `evo_power`'s. So the answer is `get().attack_interval` to the bit, at every
+---team count -- `tests/test-match-format.lua` sweeps the key space and the ways
+---an override can be wrong to hold it there.
+---@param format_key string|nil Defaults to the format in force.
+---@return integer
+function Public.attack_interval(format_key)
+    format_key = format_key or Public.current_key()
+    local set = overrides(format_key)
+    local override = set and set.attack_interval
+    local value
+    if override ~= nil and type(override) == type(defaults.attack_interval) then
+        value = override
+    else
+        value = Public.inherited_for('attack_interval', format_key)
+    end
+    local limit = limits.attack_interval
+    return math.floor(clamp(value, limit.min, limit.max) / steps.attack_interval) * steps.attack_interval
 end
 
 -- What an admin types to stop overriding a field rather than to give it a new

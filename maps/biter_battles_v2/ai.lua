@@ -5,9 +5,13 @@ local BossUnit = require('functions.boss_unit')
 local Event = require('utils.event')
 local Feeding = require('maps.biter_battles_v2.feeding')
 local Functions = require('maps.biter_battles_v2.functions')
+local Layout = require('maps.biter_battles_v2.layout')
 local Tables = require('maps.biter_battles_v2.tables')
+local Teams = require('maps.biter_battles_v2.teams')
 local AiStrikes = require('maps.biter_battles_v2.ai_strikes')
 local AiTargets = require('maps.biter_battles_v2.ai_targets')
+local AttackClock = require('maps.biter_battles_v2.attack_clock')
+local MatchFormat = require('maps.biter_battles_v2.match_format')
 local MultiSilo = require('comfy_panel.special_games.multi_silo')
 local Pathfinder = require('commands.set_pathfinder')
 local math_random = math.random
@@ -34,23 +38,67 @@ local threat_values = {
     ['spitter-spawner'] = 350 / small,
 }
 
+---The share of the map's threat that belongs to `biter_force_name` -- the
+---fraction of the seven wave slots the team it attacks is worth this cycle.
+---
+---With two teams this is the legacy expression, kept statement for statement,
+---quirks included: the `<= 0` early-out on the queried pool, the clamp of a
+---negative pool applied to the *denominator only* (so +100 against -500 is
+---still a full 1.0), and the unreachable 0.5 tie fallback. The only change is
+---that the two force names come from the registry instead of being literals,
+---and the registry hands them out in the same order -- so it is the same two
+---reads, the same addition and the same division, in the same sequence.
+---
+---Above two teams the denominator is the sum of the ALIVE biter pools, each
+---clamped at zero exactly as the two-team denominator clamps, the share is
+---scaled by `#alive / 2` so an even split still buys today's four groups
+---(`ceil(0.5 * 7)`), and the result is capped at one so a lone leader buys the
+---full seven and no more. An eliminated team is left out of both: its pool is
+---frozen where it died, and counting it would hold the survivors' share down
+---for the rest of the round.
+---@param biter_force_name string
+---@return number
 local function get_threat_ratio(biter_force_name)
     if storage.bb_threat[biter_force_name] <= 0 then
         return 0
     end
-    local t1 = storage.bb_threat['north_biters']
-    local t2 = storage.bb_threat['south_biters']
-    if t1 == 0 and t2 == 0 then
-        return 0.5
+    if Teams.count() == 2 then
+        local biter_forces = Teams.biter_forces()
+        local t1 = storage.bb_threat[biter_forces[1]]
+        local t2 = storage.bb_threat[biter_forces[2]]
+        if t1 == 0 and t2 == 0 then
+            return 0.5
+        end
+        if t1 < 0 then
+            t1 = 0
+        end
+        if t2 < 0 then
+            t2 = 0
+        end
+        local total_threat = t1 + t2
+        local ratio = storage.bb_threat[biter_force_name] / total_threat
+        return ratio
     end
-    if t1 < 0 then
-        t1 = 0
+
+    local alive = Teams.alive()
+    local biter_forces = Teams.alive_biter_forces()
+    local total_threat = 0
+    for i = 1, #biter_forces do
+        local t = storage.bb_threat[biter_forces[i]] or 0
+        if t < 0 then
+            t = 0
+        end
+        total_threat = total_threat + t
     end
-    if t2 < 0 then
-        t2 = 0
+    if total_threat == 0 then
+        -- Only reachable when the queried force is not one of the alive ones;
+        -- the early-out above guarantees a positive pool otherwise.
+        return 0
     end
-    local total_threat = t1 + t2
-    local ratio = storage.bb_threat[biter_force_name] / total_threat
+    local ratio = (storage.bb_threat[biter_force_name] / total_threat) * (#alive / 2)
+    if ratio > 1 then
+        return 1
+    end
     return ratio
 end
 
@@ -214,7 +262,12 @@ local function on_entity_spawned(event)
     if not entity.valid then
         return
     end
-    if entity.force.name == 'north_biters' or entity.force.name == 'south_biters' then
+    -- The buff goes to a naturally spawned unit of a *regular* biter force of a
+    -- team that plays this round. At two teams those are exactly the two forces
+    -- the literals used to name, and a boss force still fails the second test.
+    local force_name = entity.force.name
+    local team = Teams.team_of_biter_force(force_name)
+    if team and force_name == Teams.biter_force(team) and Teams.is_active(team) then
         local health_factor = storage.biter_health_factor[entity.force.index]
         if health_factor > 1 then
             BossUnit.add_high_health_unit(entity, health_factor, false)
@@ -274,12 +327,29 @@ local function select_units_around_spawner(spawner, force_name)
     return valid_biters
 end
 
+---Where a wave forms up: four tiles from the nest towards the river the team it
+---attacks faces.
+---
+---On the two-team map that is the legacy pair of signed steps on y, kept as it
+---stands -- the literal test, the same branch, the same four tiles.
+---
+---On the four-square map the step is the same four tiles along `Layout.inward`,
+---the unit axis vector from the victim's zone towards its front river, which for
+---the canonical zone is +y and for the other three is that vector turned with
+---their zone. A force that names no team (nothing the scheduler can produce)
+---leaves the rally point on the nest.
 local function get_unit_group_position(spawner)
     local p
-    if spawner.force.name == 'north_biters' then
-        p = { x = spawner.position.x, y = spawner.position.y + 4 }
+    if Teams.layout() == 'horizontal2' then
+        if spawner.force.name == 'north_biters' then
+            p = { x = spawner.position.x, y = spawner.position.y + 4 }
+        else
+            p = { x = spawner.position.x, y = spawner.position.y - 4 }
+        end
     else
-        p = { x = spawner.position.x, y = spawner.position.y - 4 }
+        local team = Teams.team_of_biter_force(spawner.force.name)
+        local inward = (team and Layout.inward(team)) or { x = 0, y = 0 }
+        p = { x = spawner.position.x + 4 * inward.x, y = spawner.position.y + 4 * inward.y }
     end
     p = spawner.surface.find_non_colliding_position('electric-furnace', p, 256, 1)
     if not p then
@@ -389,6 +459,17 @@ Public.pre_main_attack = function()
     Pathfinder.apply()
     local force_name = storage.next_attack
 
+    -- Above two teams a team that has just been eliminated is not attacked: a
+    -- budget of zero, which is also the idle turn the clock counts on -- the
+    -- dead keep their place in the rotation so that the survivors' turns do not
+    -- come round any faster. At two teams the cycle is untouched, dead side
+    -- included: today a dead side keeps being scheduled and the waves print
+    -- 'No side target found', and that is pinned behaviour.
+    if Teams.count() > 2 and not Teams.is_alive(force_name) then
+        storage.main_attack_wave_amount = 0
+        return
+    end
+
     -- In headless benchmarking, there are no connected_players so we need a global to override this
     if
         not storage.training_mode
@@ -398,7 +479,24 @@ Public.pre_main_attack = function()
         storage.main_attack_wave_amount = math.ceil(get_threat_ratio(biter_force_name) * 7)
 
         if storage.bb_debug then
-            game.print(storage.main_attack_wave_amount .. ' unit groups designated for ' .. force_name .. ' biters.')
+            local message = storage.main_attack_wave_amount
+                .. ' unit groups designated for '
+                .. force_name
+                .. ' biters.'
+            -- Above two teams the line also says which turn of the clock this
+            -- is: the tick it ran on and the ticks to the next cycle, so a debug
+            -- log can be read against the cadence. The shared-cycle fallback has
+            -- no period of its own -- a cycle a minute, whole cycles dropped by
+            -- `skip_attack_cycle` -- and names itself instead. The two-team
+            -- string is the legacy one, to the byte.
+            if Teams.count() > 2 then
+                local period = AttackClock.SHARED
+                if AttackClock.is_on(Teams.count()) then
+                    period = AttackClock.period(MatchFormat.attack_interval_ticks(), Teams.count())
+                end
+                message = message .. ' (tick ' .. game.tick .. ', period ' .. period .. ')'
+            end
+            game.print(message)
         end
     else
         storage.main_attack_wave_amount = 0
@@ -409,6 +507,13 @@ Public.perform_main_attack = function()
     if storage.main_attack_wave_amount > 0 then
         local surface = game.surfaces[storage.bb_surface_name]
         local force_name = storage.next_attack
+        -- A team can be eliminated between the setup wave and this one; above
+        -- two teams the rest of the cycle is dropped. Two teams keep today's
+        -- behaviour (the guard short-circuits before the alive test).
+        if Teams.count() > 2 and not Teams.is_alive(force_name) then
+            storage.main_attack_wave_amount = 0
+            return
+        end
         local biter_force_name = force_name .. '_biters'
 
         create_attack_group(surface, force_name, biter_force_name)
@@ -418,22 +523,79 @@ end
 
 Public.post_main_attack = function()
     storage.main_attack_wave_amount = 0
-    if storage.next_attack == 'north' then
-        storage.next_attack = 'south'
-    else
-        storage.next_attack = 'north'
+    if Teams.count() == 2 then
+        -- The legacy toggle, statement for statement: whoever is scheduled, the
+        -- other one is next, and anything else (including a value the toggle
+        -- has never seen) falls back to the first team. `active[1]`/`active[2]`
+        -- are 'north'/'south', in that order.
+        local active = Teams.all()
+        if storage.next_attack == active[1] then
+            storage.next_attack = active[2]
+        else
+            storage.next_attack = active[1]
+        end
+        return
     end
+
+    if AttackClock.is_on(Teams.count()) then
+        -- On the clock the turn walks the ring of every team PLAYING the round,
+        -- the eliminated ones included: their turn is an idle one (the budget
+        -- guard at the top of pre_main_attack) and it is what keeps a survivor's
+        -- turn coming round every `2 * interval` for the whole round. Skipping
+        -- the dead here instead would shorten the rotation by a turn each time a
+        -- team falls, and the last two standing would be attacked twice as often
+        -- as the game is tuned for.
+        local playing = Teams.all()
+        local next_playing = AttackClock.next_turn(playing, storage.next_attack)
+        if next_playing then
+            storage.next_attack = next_playing
+        end
+        return
+    end
+
+    -- With the shared-cycle fallback there is one cycle per interval, so a turn
+    -- spent on a team that is out is a whole interval with no attack anywhere:
+    -- the turn walks the ring clockwise stepping OVER the teams that are out,
+    -- and a `next_attack` that is not a roster team at all restarts the rotation
+    -- at the first alive team.
+    local next_team = Teams.next_alive_clockwise(storage.next_attack) or Teams.alive()[1]
+    if next_team then
+        storage.next_attack = next_team
+    end
+end
+
+---The teams the passive red-potion drip counts: who has to have players for it
+---to run at all, and whose biters receive it.
+---
+---Two teams are `Teams.all()`, today's expression: a two-team round has no
+---elimination step -- the first silo to fall ends the game -- so the active and
+---the alive list can only differ once the game is over.
+---
+---Above two teams it is the teams still standing. An eliminated team has no
+---players (they were moved to the spectators), so counting it would make the
+---empty-team gate return on every call and freeze evolution, the raise counter
+---and the derived threat income for every survivor until the map resets.
+---@return string[]
+local function passive_feed_teams()
+    if Teams.count() == 2 then
+        return Teams.all()
+    end
+    return Teams.alive()
 end
 
 Public.raise_evo = function()
     if storage.freeze_players then
         return
     end
-    if
-        not storage.training_mode
-        and (#game.forces.north.connected_players == 0 or #game.forces.south.connected_players == 0)
-    then
-        return
+    -- The passive drip is frozen while any team that counts this round is empty.
+    -- At two teams this is the old `north is empty or south is empty`, tested in
+    -- the same order and with the same short-circuit.
+    if not storage.training_mode then
+        for _, team in ipairs(passive_feed_teams()) do
+            if #game.forces[team].connected_players == 0 then
+                return
+            end
+        end
     end
     if Functions.get_ticks_since_game_start() < 7200 then
         return
@@ -457,11 +619,17 @@ Public.raise_evo = function()
     end
     storage.total_passive_feed_redpotion = storage.total_passive_feed_redpotion + amount
 
-    local biter_teams = { ['north_biters'] = 'north', ['south_biters'] = 'south' }
+    -- Ordered iteration, not `pairs` over a team-keyed literal: the body feeds
+    -- and the order has to be the same on every client. `Teams.all()` is north
+    -- then south at two teams, one `do_raw_feed` per team with players as today.
+    -- Checked in game: Factorio's `pairs` walks a string-keyed table in
+    -- INSERTION order, so the `{ north_biters = ..., south_biters = ... }`
+    -- literal this replaces ran north then south too (plain lua5.2 on a command
+    -- line orders by hash and does not show that).
     local a_team_has_players = false
-    for bf, pf in pairs(biter_teams) do
-        if #game.forces[pf].connected_players > 0 then
-            Feeding.do_raw_feed(amount, 'automation-science-pack', bf)
+    for _, team in ipairs(passive_feed_teams()) do
+        if #game.forces[team].connected_players > 0 then
+            Feeding.do_raw_feed(amount, 'automation-science-pack', Teams.biter_force(team))
             a_team_has_players = true
         end
     end
@@ -490,11 +658,45 @@ Public.reset_evo = function()
     end
     storage.total_passive_feed_redpotion = 0
 
-    local biter_teams = { ['north_biters'] = 'north', ['south_biters'] = 'south' }
-    for bf, _ in pairs(biter_teams) do
-        storage.bb_evolution[bf] = 0
-        Feeding.do_raw_feed(amount, 'automation-science-pack', bf)
+    -- Same ordered walk as `raise_evo`, over the same teams, and the same
+    -- interleaving as before: each force is zeroed and immediately re-fed
+    -- before the next one is touched. An eliminated team is not re-fed above
+    -- two teams -- its evolution is frozen where it died. Same check as there:
+    -- Factorio's `pairs` walks a string-keyed table in INSERTION order, so the
+    -- literal this replaces ran north then south as well.
+    for _, team in ipairs(passive_feed_teams()) do
+        local biter_force_name = Teams.biter_force(team)
+        storage.bb_evolution[biter_force_name] = 0
+        Feeding.do_raw_feed(amount, 'automation-science-pack', biter_force_name)
     end
+end
+
+--- Cache of "boss biter force -> the regular biter force it belongs to", with
+--- `false` for every force name that is not a boss force.
+---
+--- `subtract_threat` runs on every biter death -- the hottest AI path in the
+--- scenario -- and `Teams.team_of_biter_force` derives its answer with a pattern
+--- match. Memoising on the force name keeps the death hook allocation-free after
+--- the first death of each kind. The mapping is a property of the static roster,
+--- so it cannot go stale between rounds.
+---@type table<string, string|false>
+local base_force_of_boss = {}
+
+---The regular biter force behind a boss force, or false for anything else.
+---@param force_name string
+---@return string|false
+local function boss_base_force(force_name)
+    local cached = base_force_of_boss[force_name]
+    if cached ~= nil then
+        return cached
+    end
+    local team = Teams.team_of_biter_force(force_name)
+    local base = false
+    if team ~= nil and Teams.boss_force(team) == force_name then
+        base = Teams.biter_force(team)
+    end
+    base_force_of_boss[force_name] = base
+    return base
 end
 
 --Biter Threat Value Subtraction
@@ -508,11 +710,9 @@ function Public.subtract_threat(entity)
     local from_non_positive_threat_factor = 0.5
     local is_from_non_positive_threat = not storage.biters_from_positive_threat[entity.unit_number]
 
-    if entity.force.name == 'south_biters_boss' then
-        biter_not_boss_force = 'south_biters'
-        is_boss = true
-    elseif entity.force.name == 'north_biters_boss' then
-        biter_not_boss_force = 'north_biters'
+    local base_force = boss_base_force(entity.force.name)
+    if base_force then
+        biter_not_boss_force = base_force
         is_boss = true
     end
     if is_boss == true then
@@ -522,6 +722,7 @@ function Public.subtract_threat(entity)
         local evo = game.forces[biter_not_boss_force].get_evolution_factor(entity.surface.name)
         factor = 1 + 9 * evo ^ 2.25
     end
+    -- 2-team only special (guarded by max_teams)
     if storage.active_special_games['threat_farm_threshold'] then
         local threat_value = threat_values[entity.name] * factor
         local special_variables = storage.special_games_variables['threat_farm_threshold']

@@ -18,6 +18,8 @@
 
 local FeedingParams = require('maps.biter_battles_v2.feeding_params')
 local MatchFormat = require('maps.biter_battles_v2.match_format')
+local NteamWording = require('maps.biter_battles_v2.nteam_wording')
+local Teams = require('maps.biter_battles_v2.teams')
 local Tabs = require('comfy_panel.main')
 local Gui = require('utils.gui')
 
@@ -380,9 +382,7 @@ local function build(player, frame)
             type = 'button',
             name = APPLY,
             caption = 'Apply',
-            tooltip = 'Apply every box that differs from the value in force, to the format selected above. An emptied'
-                .. ' box stops this format overriding that parameter, dropping it back to the Default column.'
-                .. ' Announced to both teams.',
+            tooltip = NteamWording.apply_tooltip(Teams.count()),
         })
         buttons.add({
             type = 'button',
