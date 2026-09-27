@@ -584,6 +584,9 @@ function Public.tables()
     storage.bb_game_start_tick = nil
     storage.bb_threat = {}
     storage.bb_threat_income = {}
+    -- Who fed whom this round (mutagen_ledger.lua). The elimination mode itself
+    -- (`storage.elimination_mutagen_mode`) is an operator setting and survives.
+    storage.mutagen_ledger = {}
     storage.chosen_team = {}
     storage.got_burners = {}
     storage.combat_balance = {}

@@ -2,6 +2,7 @@ local bb_config = require('maps.biter_battles_v2.config')
 local FeedingCalculations = require('maps.biter_battles_v2.feeding_calculations')
 local FeedingRestriction = require('maps.biter_battles_v2.feeding_restriction')
 local Functions = require('maps.biter_battles_v2.functions')
+local MutagenLedger = require('maps.biter_battles_v2.mutagen_ledger')
 local Server = require('utils.server')
 local Teams = require('maps.biter_battles_v2.teams')
 
@@ -351,15 +352,24 @@ end
 
 Public.apply_evo_state = apply_evo_state
 
-function Public.do_raw_feed(flask_amount, food, biter_force_name)
-    local decimals = 9
-
-    -- tt_mode: bake rocket-x3 into the food value (plan §E, default interpretation)
-    -- AND accumulate RAW mutagen for the retroactive-send recompute (plan §D).
+--- The mutagen one flask of `food` is worth before difficulty: its food value,
+--- with Triple Threat's rocket x3 baked in (plan §E, default interpretation).
+--- @param food string
+--- @return number
+local function raw_food_unit_of(food)
     local raw_food_unit = food_values[food].value
     if storage.tt_mode and food == 'space-science-pack' then
         raw_food_unit = raw_food_unit * 3
     end
+    return raw_food_unit
+end
+
+function Public.do_raw_feed(flask_amount, food, biter_force_name)
+    local decimals = 9
+
+    -- tt_mode: bake rocket-x3 into the food value AND accumulate RAW mutagen
+    -- for the retroactive-send recompute (plan §D).
+    local raw_food_unit = raw_food_unit_of(food)
     if storage.tt_mode then
         -- Triple Threat plays at two, three and four teams. The
         -- fallback table is the round's biter forces rather than the two
@@ -440,6 +450,19 @@ local function feed_the_targets(player, sender_force_name, food, flask_amount, t
 
         Public.do_raw_feed(fed_amount, food, biter_force_name)
 
+        -- Booked for the elimination re-send (mutagen_ledger.lua), in both units
+        -- the evolution models read. The difficulty is the one do_raw_feed just
+        -- priced the send at.
+        local raw = raw_food_unit_of(food) * fed_amount
+        storage.mutagen_ledger = storage.mutagen_ledger or {}
+        MutagenLedger.record(
+            storage.mutagen_ledger,
+            sender_force_name,
+            target.team,
+            raw,
+            raw * storage.difficulty_vote_value
+        )
+
         Public.add_feeding_stats(
             player,
             sender_force_name,
@@ -451,6 +474,99 @@ local function feed_the_targets(player, sender_force_name, food, flask_amount, t
             index == 1 and flask_amount or 0
         )
     end
+end
+
+--- Add mutagen to a biter force's evolution -- and so to the passive threat
+--- income derived from it -- WITHOUT the instant threat a send banks. What an
+--- elimination re-send delivers (mutagen_ledger.lua).
+---
+--- Triple Threat derives evolution from the raw accumulator at the current
+--- difficulty, so there the raw amount is added and the force restated at once;
+--- everywhere else evolution is rebuilt from the difficulty-weighted amount,
+--- exactly as `do_raw_feed` does it, minus the `bb_threat` line.
+--- @param biter_force_name string
+--- @param raw number
+--- @param weighted number
+function Public.add_mutagen(biter_force_name, raw, weighted)
+    if storage.tt_mode then
+        storage.tt_raw_mutagen = storage.tt_raw_mutagen or Teams.per_biter_force(function()
+            return 0
+        end)
+        storage.tt_raw_mutagen[biter_force_name] = (storage.tt_raw_mutagen[biter_force_name] or 0) + raw
+        require('maps.biter_battles_v2.tt_mode').tt_recompute_evo(biter_force_name)
+        return
+    end
+    local evo = storage.bb_evolution[biter_force_name]
+    local effects = FeedingCalculations.calc_feed_effects(
+        evo,
+        weighted,
+        1,
+        connected_team_player_count(),
+        storage.max_reanim_thresh
+    )
+    apply_evo_state(
+        biter_force_name,
+        math_round(evo + effects.evo_increase, 9),
+        effects.biter_health_factor,
+        effects.passive_threat
+    )
+end
+
+local ELIMINATION_LEAD = {
+    [MutagenLedger.FULL] = 'the mutagen fed to them is re-sent by the teams still standing',
+    [MutagenLedger.EXCESS] = 'the mutagen fed to them beyond the smallest share is re-sent by the teams that fed more',
+}
+
+--- A team of a 3-4 team round is out: hand the mutagen fed to its biters on to
+--- the teams still standing, as the elimination mode says. Called by
+--- `game_over.lua` right after `Teams.eliminate`, so `Teams.alive()` and
+--- `Teams.feed_targets` no longer include the fallen team.
+--- @param fallen string
+function Public.redistribute_on_elimination(fallen)
+    local ledger = storage.mutagen_ledger or {}
+    storage.mutagen_ledger = ledger
+    -- What happens to it is an operator setting (`/elimination-mutagen`), kept
+    -- across rounds like the feed policy.
+    local mode = MutagenLedger.mode(storage.elimination_mutagen_mode)
+    local transfers = MutagenLedger.plan(ledger, fallen, Teams.alive(), mode, Teams.feed_targets)
+    MutagenLedger.forget_target(ledger, fallen)
+    if #transfers == 0 then
+        return
+    end
+
+    local evo_before = {}
+    for index = 1, #transfers do
+        local transfer = transfers[index]
+        local biter_force_name = Teams.biter_force(transfer.target)
+        if evo_before[transfer.target] == nil then
+            evo_before[transfer.target] = storage.bb_evolution[biter_force_name]
+        end
+        Public.add_mutagen(biter_force_name, transfer.raw, transfer.weighted)
+        MutagenLedger.record(ledger, transfer.source, transfer.target, transfer.raw, transfer.weighted)
+    end
+
+    local parts = {}
+    for index, total in ipairs(MutagenLedger.totals_by_target(transfers)) do
+        local evo_after = storage.bb_evolution[Teams.biter_force(total.team)]
+        parts[index] = table.concat({
+            Functions.team_name_with_color(total.team),
+            ' +',
+            string.format('%.1f', (evo_after - evo_before[total.team]) * 100),
+            '% evo',
+        })
+    end
+    game.print(
+        table.concat({
+            '>> [Mutagen] ',
+            Functions.team_name_with_color(fallen),
+            ' are out: ',
+            ELIMINATION_LEAD[mode],
+            '. ',
+            table.concat(parts, ', '),
+            ' (no instant threat).',
+        }),
+        { color = { r = 0.98, g = 0.66, b = 0.22 } }
+    )
 end
 
 --- @param chest LuaEntity

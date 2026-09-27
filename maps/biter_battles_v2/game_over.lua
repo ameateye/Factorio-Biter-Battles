@@ -4,6 +4,7 @@ local Captain_special = require('comfy_panel.special_games.captain')
 local MultiSilo = require('comfy_panel.special_games.multi_silo')
 local Color = require('utils.color_presets')
 local Event = require('utils.event')
+local Feeding = require('maps.biter_battles_v2.feeding')
 local Functions = require('maps.biter_battles_v2.functions')
 local CraftingList = require('commands.crafting_queue_list')
 local Gui = require('utils.gui')
@@ -544,6 +545,10 @@ local function eliminate_team(team, surface)
     -- it. The team is out, so the threat it saved up goes with it.
     storage.bb_threat[biter_force] = 0
     storage.spy_fish_timeout[team] = game.tick + 999999
+    -- ... but the mutagen fed to it is not simply lost: the teams still standing
+    -- re-send it to each other as `/elimination-mutagen` says -- evolution and
+    -- passive income only, never instant threat (mutagen_ledger.lua).
+    Feeding.redistribute_on_elimination(team)
 
     -- Everyone who played for the team, connected or not: their team choice is
     -- forgotten before they are moved, exactly as `team_manager.switch_force`
